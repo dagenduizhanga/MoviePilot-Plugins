@@ -256,13 +256,13 @@ class CMSNotify(_PluginBase):
                 for i, domain in enumerate(self._cms_domains):
                     wait_time = 0
                     if i == 1 and first_domain_notified:
-                        wait_time = 60  # Wait for 60 seconds before notifying the second domain
+                        wait_time = 120  # Wait for 120 seconds before notifying the second domain
                         logger.info(f"等待 {wait_time} 秒后通知第二个 CMS：{domain}")
                         time.sleep(wait_time)
                     elif i > 1 and first_domain_notified:
-                        # 对于第三个及以后的服务器，也在前一个成功通知后等待 60 秒
+                        # 对于第三个及以后的服务器，也在前一个成功通知后等待 120 秒
                         if success_count == i:  # 确保前一个服务器已成功通知
-                            wait_time = 60
+                            wait_time = 120
                             logger.info(f"等待 {wait_time} 秒后通知第 {i+1} 个 CMS：{domain}")
                             time.sleep(wait_time)
 
