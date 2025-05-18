@@ -15,7 +15,7 @@ class CMSNotify(_PluginBase):
     plugin_name = "CMS通知"
     plugin_desc = "整理完成115里的媒体后，通知CMS进行增量同步（strm生成）"
     plugin_icon = "https://raw.githubusercontent.com/imaliang/MoviePilot-Plugins/main/icons/cms.png"
-    plugin_version = "0.3.1"
+    plugin_version = "0.3.2"
     plugin_author = "imaliang"
     author_url = "https://github.com/imaliang"
     plugin_config_prefix = "cmsnotify_"
@@ -28,7 +28,7 @@ class CMSNotify(_PluginBase):
     _enabled = False
     _last_event_time = 0
     _wait_notify_count = 0
-    _last_notify_time = 0  # Add this to track the last notification time
+    _last_notify_finish_time = 0  # Track when the last notification finished
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -250,37 +250,33 @@ class CMSNotify(_PluginBase):
             if self._wait_notify_count > 0 and (
                 self._wait_notify_count > 1000 or self.__get_time() - self._last_event_time > 60
             ):
-                success_count = 0
-                first_domain_notified = False  # Flag to track if the first domain was notified
-
                 for i, domain in enumerate(self._cms_domains):
                     wait_time = 0
-                    if i == 1 and first_domain_notified:
-                        wait_time = 120  # Wait for 120 seconds before notifying the second domain
-                        logger.info(f"等待 {wait_time} 秒后通知第二个 CMS：{domain}")
-                        time.sleep(wait_time)
-                    elif i > 1 and first_domain_notified:
-                        # 对于第三个及以后的服务器，也在前一个成功通知后等待 120 秒
-                        if success_count == i:  # 确保前一个服务器已成功通知
-                            wait_time = 120
-                            logger.info(f"等待 {wait_time} 秒后通知第 {i+1} 个 CMS：{domain}")
+                    if i > 0 and self._last_notify_finish_time > 0:
+                        time_since_last_finish = self.__get_time() - self._last_notify_finish_time
+                        if time_since_last_finish < 120:
+                            wait_time = 120 - time_since_last_finish
+                            logger.info(f"等待 {wait_time} 秒后再通知 [{domain}]")
                             time.sleep(wait_time)
 
+                    logger.info(f"开始通知 CMS [{domain}]")
+                    start_time = self.__get_time()
                     url = f"{domain}/api/sync/lift_by_token?token={self._cms_api_token}&type={self._cms_notify_type}"
                     ret = RequestUtils().get_res(url)
-                    if ret:
-                        logger.info(f"通知CMS [{domain}] 执行增量同步成功")
-                        success_count += 1
-                        if i == 0:
-                            first_domain_notified = True
-                    elif ret is not None:
-                        logger.error(f"通知CMS [{domain}] 失败，状态码：{ret.status_code}，返回信息：{ret.text} {ret.reason}")
-                    else:
-                        logger.error(f"通知CMS [{domain}] 失败，未获取到返回信息")
+                    finish_time = self.__get_time()
+                    self._last_notify_finish_time = finish_time
 
-                if success_count > 0:
+                    if ret:
+                        logger.info(f"通知CMS [{domain}] 执行增量同步成功，耗时 {finish_time - start_time} 秒")
+                    elif ret is not None:
+                        logger.error(f"通知CMS [{domain}] 失败，状态码：{ret.status_code}，返回信息：{ret.text} {ret.reason}，耗时 {finish_time - start_time} 秒")
+                    else:
+                        logger.error(f"通知CMS [{domain}] 失败，未获取到返回信息，耗时 {finish_time - start_time} 秒")
+
+                if self._cms_domains:
                     self._wait_notify_count = 0
-                    self._last_notify_time = self.__get_time() # Update last notify time
+                    self._last_notify_finish_time = 0 # Reset after all attempts
+
             else:
                 if self._wait_notify_count > 0:
                     logger.info(
@@ -291,3 +287,4 @@ class CMSNotify(_PluginBase):
 
     def stop_service(self):
         pass
+
