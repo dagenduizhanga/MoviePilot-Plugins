@@ -12,55 +12,41 @@ from app.plugins import _PluginBase
 
 
 class CMSNotify(_PluginBase):
-    # 插件名称
     plugin_name = "CMS通知"
-    # 插件描述
     plugin_desc = "整理完成115里的媒体后，通知CMS进行增量同步（strm生成）"
-    # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/imaliang/MoviePilot-Plugins/main/icons/cms.png"
-    # 插件版本
-    plugin_version = "0.3"
-    # 插件作者
+    plugin_version = "0.3.1"
     plugin_author = "imaliang"
-    # 作者主页
     author_url = "https://github.com/imaliang"
-    # 插件配置项ID前缀
     plugin_config_prefix = "cmsnotify_"
-    # 加载顺序
     plugin_order = 1
-    # 可使用的用户级别
     auth_level = 1
 
-    # 私有属性
     _cms_notify_type = None
-    _cms_domain = None
+    _cms_domains = []
     _cms_api_token = None
     _enabled = False
     _last_event_time = 0
-    # 等待通知数量
     _wait_notify_count = 0
+    _last_notify_time = 0  # Add this to track the last notification time
 
     def init_plugin(self, config: dict = None):
         if config:
             self._enabled = config.get("enabled")
             self._cms_notify_type = config.get("cms_notify_type")
-            self._cms_domain = config.get("cms_domain")
             self._cms_api_token = config.get('cms_api_token')
+            domain = config.get("cms_domain", "")
+            if isinstance(domain, str):
+                self._cms_domains = [d.strip() for d in domain.split(",") if d.strip()]
+            elif isinstance(domain, list):
+                self._cms_domains = domain
+            else:
+                self._cms_domains = []
 
     def get_state(self) -> bool:
         return self._enabled
 
     def get_service(self) -> List[Dict[str, Any]]:
-        """
-        注册插件公共服务
-        [{
-            "id": "服务ID",
-            "name": "服务名称",
-            "trigger": "触发器：cron/interval/date/CronTrigger.from_crontab()",
-            "func": self.xxx,
-            "kwargs": {} # 定时器参数
-        }]
-        """
         if self._enabled:
             return [{
                 "id": "CMSNotify",
@@ -79,9 +65,6 @@ class CMSNotify(_PluginBase):
         pass
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """
-        拼装插件配置页面，需要返回两块数据：1、页面配置；2、数据结构
-        """
         return [
             {
                 'component': 'VForm',
@@ -91,10 +74,7 @@ class CMSNotify(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'props': {'cols': 12, 'md': 6},
                                 'content': [
                                     {
                                         'component': 'VSwitch',
@@ -112,10 +92,7 @@ class CMSNotify(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 12
-                                },
+                                'props': {'cols': 12, 'md': 12},
                                 'content': [
                                     {
                                         'component': 'VSelect',
@@ -123,10 +100,8 @@ class CMSNotify(_PluginBase):
                                             'model': 'cms_notify_type',
                                             'label': '通知类型',
                                             'items': [
-                                                {'title': '增量同步',
-                                                    'value': 'lift_sync'},
-                                                {'title': '增量同步+自动整理',
-                                                    'value': 'auto_organize'},
+                                                {'title': '增量同步', 'value': 'lift_sync'},
+                                                {'title': '增量同步+自动整理', 'value': 'auto_organize'},
                                             ]
                                         }
                                     }
@@ -139,26 +114,22 @@ class CMSNotify(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'props': {'cols': 12, 'md': 6},
                                 'content': [
                                     {
                                         'component': 'VTextField',
                                         'props': {
                                             'model': 'cms_domain',
-                                            'label': 'CMS地址'
+                                            'label': 'CMS地址（多个地址用逗号分隔）',
+                                            'hint': '如：http://cms1,http://cms2',
+                                            'persistent-hint': True
                                         }
                                     }
                                 ]
                             },
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 6
-                                },
+                                'props': {'cols': 12, 'md': 6},
                                 'content': [
                                     {
                                         'component': 'VTextField',
@@ -176,9 +147,7 @@ class CMSNotify(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
+                                'props': {'cols': 12},
                                 'content': [
                                     {
                                         'component': 'VAlert',
@@ -197,9 +166,7 @@ class CMSNotify(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                },
+                                'props': {'cols': 12},
                                 'content': [
                                     {
                                         'component': 'VAlert',
@@ -227,27 +194,16 @@ class CMSNotify(_PluginBase):
 
     @eventmanager.register(EventType)
     def send(self, event):
-        """
-        向第三方Webhook发送请求
-        """
-        if not self._enabled or not self._cms_domain or not self._cms_api_token:
+        if not self._enabled or not self._cms_domains or not self._cms_api_token:
             return
-
         if not event or not event.event_type:
             return
 
         def __to_dict(_event):
-            """
-            递归将对象转换为字典
-            """
             if isinstance(_event, dict):
-                for k, v in _event.items():
-                    _event[k] = __to_dict(v)
-                return _event
+                return {k: __to_dict(v) for k, v in _event.items()}
             elif isinstance(_event, list):
-                for i in range(len(_event)):
-                    _event[i] = __to_dict(_event[i])
-                return _event
+                return [__to_dict(i) for i in _event]
             elif isinstance(_event, tuple):
                 return tuple(__to_dict(list(_event)))
             elif isinstance(_event, set):
@@ -265,9 +221,9 @@ class CMSNotify(_PluginBase):
         event_type = event.event_type if version == "v1" else event.event_type.value
         if event_type not in ["transfer.complete", "metadata.scrape"]:
             return
+
         event_data = __to_dict(event.event_data)
 
-        # logger.info(f"event_data: {event_data}")
         if event_type == "transfer.complete":
             transferinfo = event_data["transferinfo"]
             success = transferinfo["success"]
@@ -291,27 +247,47 @@ class CMSNotify(_PluginBase):
 
     def __notify_cms(self):
         try:
-            # 当等待通知数量超过1000或者有等待通知且最后事件时间超过60秒时触发通知
-            if self._wait_notify_count > 0 and (self._wait_notify_count > 1000 or self.__get_time() - self._last_event_time > 60):
-                url = f"{self._cms_domain}/api/sync/lift_by_token?token={self._cms_api_token}&type={self._cms_notify_type}"
-                ret = RequestUtils().get_res(url)
-                if ret:
-                    logger.info("通知CMS执行增量同步成功")
+            if self._wait_notify_count > 0 and (
+                self._wait_notify_count > 1000 or self.__get_time() - self._last_event_time > 60
+            ):
+                success_count = 0
+                first_domain_notified = False  # Flag to track if the first domain was notified
+
+                for i, domain in enumerate(self._cms_domains):
+                    wait_time = 0
+                    if i == 1 and first_domain_notified:
+                        wait_time = 60  # Wait for 60 seconds before notifying the second domain
+                        logger.info(f"等待 {wait_time} 秒后通知第二个 CMS：{domain}")
+                        time.sleep(wait_time)
+                    elif i > 1 and first_domain_notified:
+                        # 对于第三个及以后的服务器，也在前一个成功通知后等待 60 秒
+                        if success_count == i:  # 确保前一个服务器已成功通知
+                            wait_time = 60
+                            logger.info(f"等待 {wait_time} 秒后通知第 {i+1} 个 CMS：{domain}")
+                            time.sleep(wait_time)
+
+                    url = f"{domain}/api/sync/lift_by_token?token={self._cms_api_token}&type={self._cms_notify_type}"
+                    ret = RequestUtils().get_res(url)
+                    if ret:
+                        logger.info(f"通知CMS [{domain}] 执行增量同步成功")
+                        success_count += 1
+                        if i == 0:
+                            first_domain_notified = True
+                    elif ret is not None:
+                        logger.error(f"通知CMS [{domain}] 失败，状态码：{ret.status_code}，返回信息：{ret.text} {ret.reason}")
+                    else:
+                        logger.error(f"通知CMS [{domain}] 失败，未获取到返回信息")
+
+                if success_count > 0:
                     self._wait_notify_count = 0
-                elif ret is not None:
-                    logger.error(
-                        f"通知CMS失败，状态码：{ret.status_code}，返回信息：{ret.text} {ret.reason}")
-                else:
-                    logger.error("通知CMS失败，未获取到返回信息")
+                    self._last_notify_time = self.__get_time() # Update last notify time
             else:
                 if self._wait_notify_count > 0:
                     logger.info(
-                        f"等待通知数量：{self._wait_notify_count}，最后事件时间：{self._last_event_time}")
+                        f"等待通知数量：{self._wait_notify_count}，最后事件时间：{self._last_event_time}"
+                    )
         except Exception as e:
             logger.error(f"通知CMS发生异常：{e}")
 
     def stop_service(self):
-        """
-        退出插件
-        """
         pass
