@@ -1,0 +1,14 @@
+{
+  "NodeSeekCheckin": {
+    "name": "NodeSeek签到（过盾版）",
+    "description": "NodeSeek 每日签到：直连失败时自动用内置浏览器通过 Cloudflare 质询后再签到，支持 FlareSolverr。",
+    "labels": "签到,NodeSeek,论坛",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/nodeseekcheckin.png",
+    "author": "dagenduizhanga",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首个版本：直连（curl_cffi 浏览器指纹）→ 内置浏览器过盾 → FlareSolverr 三通道自动降级；补上 x-csrf-challenge 请求头；缓存 cf_clearance 供次日直连复用；失败静默重试，最终结果才通知；支持 /nodeseek_sign 远程命令"
+    }
+  }
+}
