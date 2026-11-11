@@ -29,6 +29,7 @@ plugins.v2/<插件ID小写>/   插件源码（MoviePilot V2）
 package.v2.json           V2 插件市场索引
 icons/                    插件图标
 tests/                    离线测试（真实 MoviePilot V2 宿主 + 本地模拟 NodeSeek/Cloudflare）
+scripts/                  运维脚本（如 SSH 只允许密钥登录，见 scripts/README.md）
 ```
 
 ## 免责声明
