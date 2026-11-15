@@ -41,6 +41,8 @@ TEXT_PATTERNS: Dict[str, List[str]] = {
                     r"\bbalance\b"],
     "pay_card": [r"kredi ?(karti)? ?/ ?banka karti", r"kredi karti", r"banka karti", r"kart ile (ode|odeme)",
                  r"credit ?/ ?debit", r"credit card", r"debit card"],
+    "pay_binance": [r"binance ?pay", r"\bbinance\b", r"kripto ?(para)? ile", r"\bkripto\b", r"\bcrypto\b",
+                    r"\busdt\b"],
     "remove_item": [r"^sil$", r"^kaldir$", r"^urunu (sil|kaldir)$", r"^sepeti (bosalt|temizle)$", r"^tumunu (sil|kaldir)$",
                     r"^remove$", r"^delete$", r"^empty cart$", r"^clear cart$"],
     "pay_submit": [r"^odemeyi tamamla\b", r"^odemeyi onayla\b", r"^odeme yap\b", r"^guvenli odeme\b", r"^ode\b",
@@ -79,8 +81,14 @@ FAIL_TEXT = [
     r"yetersiz bakiye", r"bakiye(niz)? yetersiz", r"kart(iniz)? (reddedildi|gecersiz)",
     r"3d (dogrulama|secure)? ?(islemi)? basarisiz", r"dogrulama basarisiz", r"islem onaylanmadi",
     r"payment (failed|declined)", r"insufficient (balance|funds)", r"transaction (failed|declined)",
-    r"authentication failed",
+    r"authentication failed", r"(odeme|islem|siparis)(nin|in)? suresi (doldu|gecti)", r"payment (expired|timed out)",
 ]
+# 币安收银台上的状态文字
+BINANCE_PAID_TEXT = [r"payment (successful|completed|success)", r"paid successfully", r"successfully paid",
+                     r"odeme (basarili|tamamlandi|alindi)", r"支付成功", r"付款成功"]
+BINANCE_EXPIRED_TEXT = [r"\bexpired\b", r"order (has been )?(closed|cancell?ed)", r"suresi doldu", r"已过期",
+                        r"订单已关闭", r"payment failed"]
+PAY_MODE_TEXT = {"balance": "余额支付", "card": "银行卡支付", "binance": "币安支付（Binance Pay）"}
 SUCCESS_URL = r"(basarili|success|tamamlandi|tesekkur|siparis-?(onay|tamam|basari)|order-?(complete|success|confirm)|odeme-?basari)"
 FAIL_URL = r"(basarisiz|odeme-?hata|payment-?(fail|error)|/fail)"
 OUT_OF_STOCK_TEXT = [r"stokta yok", r"\btukendi\b", r"stok(ta)? kalmadi", r"out of stock", r"sold out",
@@ -412,6 +420,55 @@ JS_VERIFY_STATE = "([otpSel]) => {" + _JS_FOLD + r"""
 }
 """
 
+JS_BINANCE_STATE = "([ignoreIds]) => {" + _JS_FOLD + r"""
+    const body = document.body ? (document.body.innerText || '') : '';
+    const text = fold(body).slice(0, 8000);
+    const links = [];
+    for (const a of document.querySelectorAll('a[href]')) {
+        const href = a.getAttribute('href') || '';
+        if (!/(binance\.(com|me|info)|^bnc:\/\/)/i.test(href)) continue;
+        // 只要像付款单的链接（收银台 / secpay / 带订单参数），不要页脚的币安首页链接
+        if (!/^bnc:\/\//i.test(href) && !/(checkout|payment|secpay|\/pay\b|\/pay\/|qrcode|prepay|linktoken|order)/i.test(href)) continue;
+        if (links.indexOf(href) < 0) links.push(href);
+    }
+    // 二维码：接近正方形、足够大的 img/canvas/svg，带 qr 字样或旁边有扫码/币安提示
+    const cands = [];
+    for (const el of document.querySelectorAll('img,canvas,svg')) {
+        if (!visible(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 80 || r.height < 80) continue;
+        const ratio = r.width / r.height;
+        if (ratio < 0.8 || ratio > 1.25) continue;
+        const cls = typeof el.className === 'string' ? el.className : ((el.className && el.className.baseVal) || '');
+        const pcls = el.parentElement && typeof el.parentElement.className === 'string' ? el.parentElement.className : '';
+        const src = (el.getAttribute('src') || '').slice(0, 200);
+        const attrs = fold([el.id, cls, pcls, el.getAttribute('alt'), src, el.getAttribute('aria-label'), el.getAttribute('title')].join(' '));
+        let score = 0;
+        if (/qr/.test(attrs)) score += 3;
+        if (/binance/.test(attrs)) score += 1;
+        if (el.tagName === 'CANVAS') score += 1;
+        if (src.startsWith('data:image')) score += 1;
+        let p = el.parentElement, depth = 0, near = '';
+        while (p && depth < 5) { near = fold(p.innerText || ''); if (near.length > 20) break; p = p.parentElement; depth++; }
+        if (/(binance|qr|okut|tara|scan|usdt)/.test(near)) score += 2;
+        if (/(logo|icon|avatar|banner|flag)/.test(attrs)) score -= 5;
+        const id = mark(el);
+        if ((ignoreIds || []).indexOf(id) >= 0) continue;
+        cands.push({id, score, w: r.width});
+    }
+    cands.sort((a, b) => (b.score - a.score) || (b.w - a.w));
+    const qr = cands.length && cands[0].score >= 2 ? cands[0] : null;
+    const money = body.match(/(\d+(?:[.,]\d+)?)\s*(USDT|USDC|FDUSD|BUSD|BNB|BTC|ETH)\b/i);
+    const timer = body.match(/(?:^|[^\d:])(\d{1,2}:\d{2})(?![\d:])/);
+    return {
+        url: location.href, links, qr,
+        binanceText: /(binance|usdt|kripto|crypto)/.test(text),
+        amount: money ? money[1] : '', currency: money ? money[2].toUpperCase() : '',
+        countdown: timer ? timer[1] : '', snippet: text.slice(0, 240), text: text.slice(0, 4000)
+    };
+}
+"""
+
 JS_CAPTCHA = r"""
 () => !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="challenges.cloudflare.com"], .g-recaptcha, .h-captcha, .cf-turnstile')
 """
@@ -469,6 +526,7 @@ class PurchaseRequest:
     card: CardInfo = field(default_factory=CardInfo)
     verify_timeout: int = 300
     known_codes: Sequence[str] = ()
+    pay_timeout: int = 900
 
 
 @dataclass
@@ -504,6 +562,12 @@ class Interaction:
 
     def verification_feedback(self, text: str) -> None:
         """验证过程中的提示（如验证码错误）"""
+
+    def payment_needed(self, info: Dict[str, Any], qr: Optional[Path], screenshot: Optional[Path]) -> None:
+        """需要用户用币安付款：info 含 links / amount / currency / countdown / url"""
+
+    def payment_feedback(self, text: str) -> None:
+        """币安付款过程中的提示"""
 
     def poll(self) -> Optional[str]:
         """非阻塞取用户输入：数字验证码 / 'ok' / 'cancel'；没有输入返回 None"""
@@ -1108,8 +1172,8 @@ class OyunforShop:
         return bool(self.find("checkout", maxLen=40, patterns=[r"^odemeye gec\b", r"^alisverisi tamamla\b"]))
 
     def _looks_like_checkout(self) -> bool:
-        return bool(self.find("pay_balance", maxLen=80, selector=OPTION_SELECTOR, exclude=PAYMENT_EXCLUDE)
-                    or self.find("pay_card", maxLen=80, selector=OPTION_SELECTOR, exclude=PAYMENT_EXCLUDE))
+        return any(self.find(key, maxLen=80, selector=OPTION_SELECTOR, exclude=PAYMENT_EXCLUDE)
+                   for key in ("pay_balance", "pay_card", "pay_binance"))
 
     def select_payment(self, mode: str) -> Tuple[str, Optional[Dict[str, Any]]]:
         """
@@ -1117,8 +1181,8 @@ class OyunforShop:
         :return: (选项文字, 付款按钮)。如果「付款方式」本身就是付款按钮（如「Bakiye ile Öde」按钮），
                  不点击，作为付款按钮返回，交给后面的演练/付款逻辑处理。
         """
-        key = "pay_balance" if mode == "balance" else "pay_card"
-        what = "余额支付" if mode == "balance" else "银行卡支付"
+        key = {"balance": "pay_balance", "card": "pay_card", "binance": "pay_binance"}.get(mode, "pay_balance")
+        what = PAY_MODE_TEXT.get(mode, mode)
         found = self.find(key, maxLen=80, selector=OPTION_SELECTOR, exclude=PAYMENT_EXCLUDE)
         if not found:
             self.snap("payment-options")
@@ -1391,9 +1455,9 @@ class OyunforShop:
                 continue
             hits, url, codes = self._outcome_hits(frame)
             same_page = frame is self.page.main_frame and url == baseline.get("url")
-            if same_page:
-                hits = [hit for hit in hits if hit not in baseline.get("hits", set())]
-                codes = [code for code in codes if code not in baseline.get("codes", set())]
+            # 点击付款前就出现过的文字（如页脚的「teşekkür ederiz」）在任何页面上都不算结果
+            hits = [hit for hit in hits if hit not in baseline.get("hits", set())]
+            codes = [code for code in codes if code not in baseline.get("codes", set())]
             for kind, detail in hits:
                 if kind == OUT_FAILED:
                     return OUT_FAILED, detail
@@ -1545,6 +1609,190 @@ class OyunforShop:
                 return True
             time.sleep(1)
         return False
+
+    # ------------------------------------------------------------ 币安支付
+    @staticmethod
+    def _is_binance_host(url: str) -> bool:
+        parsed = urlparse(url or "")
+        host = parsed.hostname or ""
+        return (host.endswith("binance.com") or host.endswith("binance.me") or host.endswith("binance.info")
+                or "/binance" in (parsed.path or "").lower())
+
+    def _binance_state(self, ignore_links: Optional[set] = None,
+                       ignore_qr: Optional[List[str]] = None) -> Optional[Tuple[Any, Dict[str, Any]]]:
+        """
+        在当前页面的所有 frame 里找币安付款信息（二维码 / 付款链接 / 金额 / 倒计时）
+        :param ignore_links: 点击付款前页面上就有的链接（不是本次付款单）
+        """
+        best = None
+        for frame in self._frames():
+            try:
+                state = frame.evaluate(JS_BINANCE_STATE, [list(ignore_qr or [])])
+            except Exception:  # noqa
+                continue
+            if not isinstance(state, dict):
+                continue
+            if ignore_links:
+                state["links"] = [link for link in state.get("links") or [] if link not in ignore_links]
+            for selector in self.override_selectors("binance_qr"):
+                try:
+                    locator = frame.locator(selector).first
+                    if locator.count() and locator.is_visible():
+                        marker = locator.evaluate("el => { if (!el.getAttribute('data-mpx')) "
+                                                  "el.setAttribute('data-mpx', 'q' + Math.random().toString(36).slice(2, 10)); "
+                                                  "return el.getAttribute('data-mpx'); }")
+                        state["qr"] = {"id": marker, "score": 99}
+                        break
+                except Exception:  # noqa
+                    continue
+            on_binance = self._is_binance_host(frame.url or "")
+            has_qr = bool(state.get("qr"))
+            relevant = (on_binance and (has_qr or state.get("binanceText") or state.get("links"))) or \
+                       (has_qr and state.get("binanceText")) or bool(state.get("links"))
+            if not relevant:
+                continue
+            rank = (0 if has_qr else 1, 0 if on_binance else 1)
+            if best is None or rank < best[0]:
+                best = (rank, frame, state)
+        if not best:
+            return None
+        frame, state = best[1], best[2]
+        links = list(state.get("links") or [])
+        if self._is_binance_host(frame.url or "") and not self.on_site(frame.url or ""):
+            # 币安托管的收银台页面本身就是可分享的付款链接
+            if frame.url not in links:
+                links.insert(0, frame.url)
+        state["links"] = [urljoin(frame.url or self.base_url, link) if not link.startswith("bnc://") else link
+                          for link in links]
+        return frame, state
+
+    def _snap_element(self, frame: Any, marker: Dict[str, Any], name: str) -> Optional[Path]:
+        if not self.recorder.directory:
+            return None
+        self.recorder.index += 1
+        path = self.recorder.directory / f"{self.recorder.index:02d}-{name}.png"
+        try:
+            frame.locator(f'[data-mpx="{marker["id"]}"]').first.screenshot(path=str(path), timeout=10000)
+            return path
+        except Exception as err:
+            self.note(f"二维码截图失败：{str(err)[:120]}")
+            return None
+
+    def check_codes_in_tab(self, known: Iterable[str], quantity: int) -> Tuple[List[str], str]:
+        """另开一个标签页去订单页查兑换码（不打扰正在显示的付款页）"""
+        main = self.page
+        tab = None
+        try:
+            tab = self.context.new_page()
+            self.page = tab
+            return self.collect_codes(known, quantity)
+        except FlowError as err:
+            self.note(f"查订单失败：{err.message}")
+            return [], ""
+        except Exception as err:  # noqa
+            self.note(f"查订单失败：{type(err).__name__}: {str(err)[:120]}")
+            return [], ""
+        finally:
+            self.page = main
+            if tab is not None:
+                try:
+                    tab.close()
+                except Exception:  # noqa
+                    pass
+
+    def submit_and_wait_binance(self, frame: Any, button: Dict[str, Any], interaction: Interaction,
+                                pay_timeout: int, known: Iterable[str], quantity: int,
+                                appear_timeout: int = 90) -> Tuple[str, str, List[str], str, bool]:
+        """
+        点击付款，拿到币安付款二维码/链接推送给用户，然后等用户付款。
+        :return: (结果, 说明, 兑换码, 订单地址, 用户是否说过已付款)
+        """
+        baseline = self.outcome_baseline()
+        before = self._binance_state()
+        ignore_links = set(before[1].get("links") or []) if before else set()
+        # 付款前就在页面上的「二维码样」图片（多半是币安 Logo）不算
+        ignore_qr = [before[1]["qr"]["id"]] if before and before[1].get("qr") else []
+        if not self.click(button, frame=frame, what=f"创建币安付款（{button.get('text')}）"):
+            raise FlowError("failed", "点击付款按钮失败")
+        start = time.time()
+        shown_at = None
+        user_paid = False
+        binance_paid = False
+        last_check = 0.0
+        last_signature = ""
+        known = list(known or [])
+        while True:
+            now = time.time()
+            if shown_at is None and now - start > appear_timeout:
+                self.snap("binance-not-shown")
+                return OUT_FAILED, "提交后没有出现币安付款二维码或链接", [], "", user_paid
+            self.adopt_new_page()
+            command = interaction.poll()
+            if command == "cancel" or interaction.cancelled():
+                self.snap("cancelled")
+                return OUT_CANCELLED, "已按你的指令取消（不付款的话，币安订单到期会自动关闭）", [], "", user_paid
+            if command:
+                if not user_paid:
+                    self.note("用户表示已付款，去订单页确认")
+                user_paid = True
+                last_check = 0.0
+
+            outcome, detail = self._outcome_state(baseline)
+            if outcome == OUT_SUCCESS:
+                self.snap("result-success")
+                return OUT_SUCCESS, detail, [], "", user_paid
+            if outcome == OUT_FAILED:
+                self.snap("result-failed")
+                return OUT_FAILED, detail, [], "", user_paid
+
+            state = self._binance_state(ignore_links, ignore_qr)
+            if state:
+                bframe, info = state
+                text = info.get("text") or ""
+                if not binance_paid and any(re.search(p, text) for p in BINANCE_PAID_TEXT):
+                    binance_paid = True
+                    self.note("币安页面显示已付款，等待 Oyunfor 发货")
+                    self.snap("binance-paid")
+                    last_check = 0.0
+                elif not binance_paid and any(re.search(p, text) for p in BINANCE_EXPIRED_TEXT) and shown_at:
+                    self.snap("binance-expired")
+                    return OUT_TIMEOUT, "币安付款单已过期或关闭", [], "", user_paid
+                signature = "|".join(info.get("links") or []) + "|" + str(bool(info.get("qr")))
+                if shown_at is None or (signature != last_signature and not binance_paid):
+                    last_signature = signature
+                    first = shown_at is None
+                    shown_at = shown_at or time.time()
+                    shot = self.snap("binance-pay")
+                    qr = self._snap_element(bframe, info["qr"], "binance-qr") if info.get("qr") else None
+                    self.note(f"币安付款信息：金额 {info.get('amount') or '?'} {info.get('currency') or ''}，"
+                              f"倒计时 {info.get('countdown') or '?'}，链接 {len(info.get('links') or [])} 个，"
+                              f"二维码 {'有' if qr else '无'}")
+                    if first or info.get("links"):
+                        interaction.payment_needed(info, qr, shot)
+
+            if shown_at is not None:
+                # 付款后 Oyunfor 页面不一定自动跳转：定期去订单页看看
+                interval = 20 if (user_paid or binance_paid) else 90
+                if now - last_check > interval:
+                    last_check = now
+                    codes, order_url = self.check_codes_in_tab(known, quantity)
+                    if codes:
+                        self.note("订单页已经出现新的兑换码")
+                        return OUT_SUCCESS, "订单页出现了新的兑换码", codes, order_url, user_paid
+                    if user_paid and not binance_paid:
+                        interaction.payment_feedback("还没在订单里查到付款，继续等待（币安确认通常需要几十秒）")
+                if now - shown_at > pay_timeout:
+                    codes, order_url = self.check_codes_in_tab(known, quantity)
+                    if codes:
+                        return OUT_SUCCESS, "订单页出现了新的兑换码", codes, order_url, user_paid
+                    self.snap("binance-timeout")
+                    if user_paid or binance_paid:
+                        return OUT_UNKNOWN, f"{pay_timeout // 60} 分钟内没有等到 Oyunfor 发货", [], "", True
+                    return OUT_TIMEOUT, f"{pay_timeout // 60} 分钟内没有检测到付款", [], "", user_paid
+            try:
+                self.page.wait_for_timeout(1000)
+            except Exception:  # noqa
+                time.sleep(1)
 
     # ------------------------------------------------------------ 兑换码
     def scan_codes(self) -> List[str]:
@@ -1742,12 +1990,23 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
         if request.pay_mode != "card":
             shop.snap("before-pay")
         paid = True
-        outcome, detail, verification = shop.submit_and_wait(pay_frame, pay_button, interaction,
-                                                             request.verify_timeout)
-        result.verification = verification
+        early_codes: List[str] = []
+        early_url = ""
+        binance = request.pay_mode == "binance"
+        if binance:
+            outcome, detail, early_codes, early_url, user_paid = shop.submit_and_wait_binance(
+                pay_frame, pay_button, interaction, request.pay_timeout, request.known_codes, quantity)
+            result.verification = "binance"
+        else:
+            outcome, detail, verification = shop.submit_and_wait(pay_frame, pay_button, interaction,
+                                                                 request.verify_timeout)
+            result.verification = verification
         if outcome == OUT_SUCCESS:
             shop.note(f"付款成功：{detail}")
-            codes, order_url = shop.collect_codes(request.known_codes, quantity)
+            if early_codes:
+                codes, order_url = early_codes, early_url
+            else:
+                codes, order_url = shop.collect_codes(request.known_codes, quantity)
             result.codes = codes
             result.order_url = order_url
             if codes:
@@ -1758,10 +2017,14 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
             result.status, result.message = "failed", f"付款失败：{detail}"
             paid = False
         elif outcome == OUT_CANCELLED:
-            result.status, result.message = "cancelled", "已取消（没有完成验证的交易不会扣款，如有疑问请到订单页核对）"
+            result.status = "cancelled"
+            result.message = ("已取消。不要再扫这个付款码；如果其实已经付了，兑换码会出现在 Oyunfor 订单里" if binance
+                              else "已取消（没有完成验证的交易不会扣款，如有疑问请到订单页核对）")
             paid = False
         elif outcome == OUT_TIMEOUT:
-            result.status, result.message = "timeout", f"{detail}，已放弃这笔交易（之后不要再在银行 App 里确认它）"
+            result.status = "timeout"
+            result.message = (f"{detail}。不要再扫这个付款码；如果其实已经付了，兑换码会出现在 Oyunfor 订单里" if binance
+                              else f"{detail}，已放弃这笔交易（之后不要再在银行 App 里确认它）")
             paid = False
         else:
             result.status, result.message = "unknown", f"{detail}，结果未知，请到 Oyunfor 订单页核对，不要重复购买"

@@ -11,6 +11,7 @@ import base64
 import hashlib
 import queue
 import re
+import secrets
 import shutil
 import threading
 import time
@@ -30,8 +31,8 @@ from app.schemas import NotificationType
 from app.schemas.types import EventType
 
 from .browser import add_cookies, launch_browser, playwright_proxy
-from .shop import (BASE_URL, CardInfo, Interaction, OyunforShop, PurchaseRequest, PurchaseResult, StepRecorder,
-                   check_account, load_overrides, mask_code, parse_cookie, parse_expiry, run_purchase)
+from .shop import (BASE_URL, CardInfo, Interaction, OyunforShop, PurchaseRequest, PurchaseResult,
+                   StepRecorder, check_account, load_overrides, mask_code, parse_cookie, parse_expiry, run_purchase)
 
 BASE_PLUGIN_ID = "Oyunfor" + "GiftCard"
 
@@ -61,7 +62,10 @@ VERIFY_KIND_TEXT = {
     "otp": "银行要求输入验证码（短信/OTP）",
     "app": "银行要求在手机 App 中确认（Digital Token / 推送）",
     "unknown": "出现了银行验证页面",
+    "binance": "等待你用币安付款",
 }
+PAY_MODES = ("binance", "balance", "card")
+PAY_MODE_SHORT = {"balance": "余额", "card": "银行卡", "binance": "币安"}
 
 
 class _Job:
@@ -78,6 +82,10 @@ class _Job:
         self.screenshot: Optional[Path] = None
         self.cancel = threading.Event()
         self.inbox: "queue.Queue[str]" = queue.Queue()
+        # 币安付款信息与二维码（二维码通过一次性令牌对外提供，给消息渠道取图）
+        self.pay_info: Dict[str, Any] = {}
+        self.qr_path: Optional[Path] = None
+        self.qr_token = secrets.token_hex(16)
 
 
 class _PluginInteraction(Interaction):
@@ -94,6 +102,16 @@ class _PluginInteraction(Interaction):
 
     def verification_feedback(self, text: str) -> None:
         self.plugin.send(self.job.reply, "【Oyunfor 验证】", text)
+
+    def payment_needed(self, info: Dict[str, Any], qr: Optional[Path], screenshot: Optional[Path]) -> None:
+        self.job.waiting = "binance"
+        self.job.pay_info = {k: info.get(k) for k in ("links", "amount", "currency", "countdown", "url")}
+        self.job.qr_path = qr or self.job.qr_path
+        self.job.screenshot = qr or screenshot or self.job.screenshot
+        self.plugin.notify_payment(self.job)
+
+    def payment_feedback(self, text: str) -> None:
+        self.plugin.send(self.job.reply, "【Oyunfor 币安付款】", text)
 
     def poll(self) -> Optional[str]:
         try:
@@ -112,11 +130,11 @@ class OyunforGiftCard(_PluginBase):
     # 插件名称
     plugin_name = "Oyunfor 礼品卡购买"
     # 插件描述
-    plugin_desc = "在 oyunfor.com 自动购买 App Store 礼品卡（TL），支持余额或银行卡付款，3DS 验证码通过消息转发给你。"
+    plugin_desc = "在 oyunfor.com 自动购买 App Store 礼品卡（TL）：把币安付款码推给你，付款后推送兑换码；也支持余额、银行卡（3DS 转发）。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     # 插件作者
     plugin_author = "dagenduizhanga"
     # 作者主页
@@ -144,7 +162,8 @@ class OyunforGiftCard(_PluginBase):
     _amount = "250"
     _product_url = ""
     _quantity = 1
-    _pay_mode = "balance"
+    _pay_mode = "binance"
+    _pay_timeout = 15
     _card_use_saved = True
     _card_last4 = ""
     _card_number = ""
@@ -183,7 +202,8 @@ class OyunforGiftCard(_PluginBase):
         self._amount = str(config.get("amount") or "").strip()
         self._product_url = (config.get("product_url") or "").strip()
         self._quantity = self._int(config.get("quantity"), 1, 1, 10)
-        self._pay_mode = "card" if config.get("pay_mode") == "card" else "balance"
+        self._pay_mode = config.get("pay_mode") if config.get("pay_mode") in PAY_MODES else "binance"
+        self._pay_timeout = self._int(config.get("pay_timeout"), 15, 3, 60)
         self._card_use_saved = bool(config.get("card_use_saved", True))
         self._card_last4 = re.sub(r"\D", "", str(config.get("card_last4") or ""))[-4:]
         self._card_number = re.sub(r"[^\d ]", "", str(config.get("card_number") or "")).strip()
@@ -247,7 +267,7 @@ class OyunforGiftCard(_PluginBase):
             "enabled": self._enabled, "notify": self._notify, "onlyonce": False, "dry_run": self._dry_run,
             "cookie": self._cookie, "username": self._username, "password": self._password,
             "amount": self._amount, "product_url": self._product_url, "quantity": self._quantity,
-            "pay_mode": self._pay_mode, "card_use_saved": self._card_use_saved, "card_last4": self._card_last4,
+            "pay_mode": self._pay_mode, "pay_timeout": self._pay_timeout, "card_use_saved": self._card_use_saved, "card_last4": self._card_last4,
             "card_number": self._card_number, "card_holder": self._card_holder, "card_expiry": self._card_expiry,
             "card_cvv": self._card_cvv, "max_total": self._max_total, "daily_limit": self._daily_limit,
             "verify_timeout": self._verify_timeout, "cron": self._cron, "use_proxy": self._use_proxy,
@@ -288,7 +308,7 @@ class OyunforGiftCard(_PluginBase):
 
     # ------------------------------------------------------------------ 消息
     def send(self, reply: Optional[dict], title: str, text: str = "", buttons: Optional[list] = None,
-             force: bool = False):
+             force: bool = False, image: Optional[str] = None):
         """发送消息：有回复目标时只回给触发者，否则按通知开关广播"""
         reply = reply or {}
         if not force and not reply.get("channel") and not reply.get("userid") and not self._notify:
@@ -296,6 +316,8 @@ class OyunforGiftCard(_PluginBase):
         kwargs: Dict[str, Any] = {}
         if buttons:
             kwargs["buttons"] = buttons
+        if image:
+            kwargs["image"] = image
         try:
             self.post_message(channel=reply.get("channel"), userid=reply.get("userid"),
                               mtype=NotificationType.Plugin, title=title, text=text, **kwargs)
@@ -331,6 +353,40 @@ class OyunforGiftCard(_PluginBase):
         ]]
         self.send(job.reply, "【Oyunfor 需要你验证付款】", "\n".join(lines), buttons=buttons, force=True)
 
+    def qr_image_url(self, job: _Job) -> Optional[str]:
+        """给消息渠道取二维码图片用的地址（MoviePilot 自己去取，再以图片发给 Telegram 等渠道）"""
+        if not job.qr_path:
+            return None
+        port = getattr(settings, "PORT", 3001) or 3001
+        return f"http://127.0.0.1:{port}/api/v1/plugin/{self.__class__.__name__}/qr?token={job.qr_token}"
+
+    def notify_payment(self, job: _Job):
+        info = job.pay_info or {}
+        plugin_id = self.__class__.__name__
+        lines: List[str] = []
+        if info.get("amount"):
+            lines.append(f"💰 应付：{info['amount']} {info.get('currency') or ''}".rstrip())
+        if info.get("countdown"):
+            lines.append(f"⏳ 页面倒计时：{info['countdown']}")
+        links = [link for link in info.get("links") or [] if link.startswith("http")]
+        if links:
+            lines.append(f"🔗 付款链接（手机上点开会跳到币安 App）：{links[0]}")
+        if job.qr_path:
+            lines.append("📷 或者在币安 App 里用「扫一扫」扫这张二维码（也可以长按保存，从相册识别）")
+        if not links and not job.qr_path:
+            lines.append("⚠️ 没抓到二维码和付款链接，请打开插件详情页看截图")
+        lines.append(f"✅ 付好后不用回复，插件会自动取码；几分钟没动静就点「我已付款」或发 {self._cmd('paid')}")
+        lines.append(f"❌ 不买了：{self._cmd('cancel')}（不付款的话，付款单到期会自动关闭）")
+        lines.append(f"⏱ 最多等 {self._pay_timeout} 分钟")
+        buttons = [[
+            {"text": "✅ 我已付款", "callback_data": f"[PLUGIN]{plugin_id}|paid"},
+            {"text": "❌ 取消购买", "callback_data": f"[PLUGIN]{plugin_id}|cancel"},
+        ]]
+        if links:
+            buttons.insert(0, [{"text": "🔗 打开币安付款", "url": links[0]}])
+        self.send(job.reply, "【Oyunfor 请用币安付款】", "\n".join(lines), buttons=buttons,
+                  image=self.qr_image_url(job), force=True)
+
     # ------------------------------------------------------------------ 任务控制
     def busy(self) -> bool:
         return self._job is not None
@@ -343,6 +399,8 @@ class OyunforGiftCard(_PluginBase):
         value = (raw or "").strip()
         if value.lower() in ("", "ok", "done", "yes", "approved", "已确认", "确认"):
             job.inbox.put("ok")
+            if job.waiting == "binance":
+                return True, "好的，正在去订单页确认付款，查到兑换码后马上推送给你"
             return True, "好的，继续等待页面跳转"
         digits = re.sub(r"[\s-]", "", value)
         if not re.fullmatch(r"[0-9A-Za-z]{3,12}", digits):
@@ -415,13 +473,14 @@ class OyunforGiftCard(_PluginBase):
         request = PurchaseRequest(amount=amount, product_url=product_url, quantity=quantity or self._quantity,
                                   pay_mode=self._pay_mode, dry_run=dry_run, max_total=self._max_total,
                                   card=self._card(), verify_timeout=self._verify_timeout,
+                                  pay_timeout=self._pay_timeout * 60,
                                   known_codes=list(self.get_data("known_codes") or []))
         thread = threading.Thread(target=self._purchase_worker, args=(job, request), daemon=True,
                                   name=f"oyunfor-{job.id}")
         thread.start()
         target = product_url or f"{amount} TL"
         what = "演练" if dry_run else "购买"
-        return True, f"开始{what}：{target} × {request.quantity}（{'余额' if self._pay_mode == 'balance' else '银行卡'}）"
+        return True, f"开始{what}：{target} × {request.quantity}（{PAY_MODE_SHORT[self._pay_mode]}）"
 
     def start_check(self, reply: Optional[dict] = None) -> Tuple[bool, str]:
         if self._lock is None:
@@ -576,6 +635,8 @@ class OyunforGiftCard(_PluginBase):
             "message": result.message,
             "codes": result.codes,
             "verification": result.verification,
+            "crypto": f"{job.pay_info.get('amount')} {job.pay_info.get('currency') or ''}".strip()
+            if job.pay_info.get("amount") else "",
             "order_url": result.order_url,
             "balance": result.balance,
         }
@@ -603,7 +664,9 @@ class OyunforGiftCard(_PluginBase):
         if record.get("product"):
             lines.append(f"🎁 {record['product']} × {record['quantity']}")
         if result.total is not None:
-            lines.append(f"💳 应付：{result.total:.2f} TL（{'余额' if request.pay_mode == 'balance' else '银行卡'}）")
+            lines.append(f"💳 应付：{result.total:.2f} TL（{PAY_MODE_SHORT.get(request.pay_mode, request.pay_mode)}）")
+        if job.pay_info.get("amount"):
+            lines.append(f"🪙 币安付款：{job.pay_info['amount']} {job.pay_info.get('currency') or ''}".rstrip())
         if result.codes:
             for code in result.codes:
                 lines.append(f"🔑 {code if self._show_code else mask_code(code)}")
@@ -643,6 +706,7 @@ class OyunforGiftCard(_PluginBase):
         commands = [
             ("buy", "Oyunfor 购买礼品卡（参数：面额 数量，如 250 1）"),
             ("code", "Oyunfor 提交 3DS 验证码（参数：验证码；不带参数=已在App确认）"),
+            ("paid", "Oyunfor 我已用币安付款（让插件去订单页确认）"),
             ("cancel", "Oyunfor 取消当前购买"),
             ("status", "Oyunfor 检查登录与余额"),
         ]
@@ -677,6 +741,9 @@ class OyunforGiftCard(_PluginBase):
         elif name == "code":
             ok, message = self.submit_code(arg_str)
             self.send(reply, "【Oyunfor 验证】", message, force=True)
+        elif name == "paid":
+            ok, message = self.submit_code("ok")
+            self.send(reply, "【Oyunfor】", message, force=True)
         elif name == "cancel":
             ok, message = self.cancel_job()
             self.send(reply, "【Oyunfor】", message, force=True)
@@ -693,7 +760,7 @@ class OyunforGiftCard(_PluginBase):
             return
         reply = {"channel": data.get("channel"), "userid": data.get("userid")}
         text = str(data.get("text") or "")
-        if text == "approved":
+        if text in ("approved", "paid"):
             ok, message = self.submit_code("ok")
         elif text == "cancel":
             ok, message = self.cancel_job()
@@ -706,6 +773,8 @@ class OyunforGiftCard(_PluginBase):
             {"path": "/code", "endpoint": self.api_code, "methods": ["GET"], "summary": "提交 3DS 验证码",
              "description": "参数 code=验证码；code=ok 表示已在 App 中确认"},
             {"path": "/cancel", "endpoint": self.api_cancel, "methods": ["GET"], "summary": "取消当前购买"},
+            {"path": "/qr", "endpoint": self.api_qr, "methods": ["GET"], "allow_anonymous": True,
+             "summary": "当前币安付款二维码（一次性令牌，任务结束即失效）"},
             {"path": "/debug", "endpoint": self.api_debug, "methods": ["GET"],
              "summary": "下载最近一次运行的截图与页面（zip）", "description": "参数 run=运行编号，留空为最近一次"},
         ]
@@ -713,6 +782,15 @@ class OyunforGiftCard(_PluginBase):
     def api_code(self, code: str = "") -> dict:
         ok, message = self.submit_code(code)
         return {"success": ok, "message": message}
+
+    def api_qr(self, token: str = ""):
+        from starlette.responses import FileResponse, JSONResponse
+
+        job = self._job
+        if (not job or not job.qr_path or not token or not secrets.compare_digest(token, job.qr_token)
+                or not Path(job.qr_path).exists()):
+            return JSONResponse({"success": False, "message": "没有可用的付款二维码"}, status_code=404)
+        return FileResponse(str(job.qr_path), media_type="image/png")
 
     def api_cancel(self) -> dict:
         ok, message = self.cancel_job()
@@ -796,12 +874,19 @@ class OyunforGiftCard(_PluginBase):
                     hint(6, "VTextField", "填了就优先用链接，不按面额找", model="product_url", label="商品链接（可选）",
                          placeholder="https://www.oyunfor.com/apple-store/..."),
                 ]},
-                title("③ 怎么付：余额最稳（自己先充值余额）；银行卡需要你在场完成 3DS 验证"),
+                title("③ 怎么付：币安支付最省事（把付款码推给你，你在币安 App 付款）；余额要先充值；银行卡需要完成 3DS"),
                 {"component": "VRow", "content": [
                     col(4, "VSelect", model="pay_mode", label="付款方式", items=[
-                        {"title": "账户余额（推荐）", "value": "balance"},
+                        {"title": "币安支付 Binance Pay（推荐）", "value": "binance"},
+                        {"title": "账户余额", "value": "balance"},
                         {"title": "银行卡（3DS 转发给你）", "value": "card"},
                     ]),
+                    hint(4, "VTextField", "推送付款码后最多等多久（分钟）", model="pay_timeout", label="币安付款等待",
+                         type="number"),
+                    col(4, "VAlert", type="info", variant="tonal", density="compact",
+                        text="币安模式不需要填卡；下面的银行卡设置只在选「银行卡」时使用"),
+                ]},
+                {"component": "VRow", "content": [
                     hint(4, "VSwitch", "网站上有已保存的卡时直接选它", model="card_use_saved", label="使用网站已保存的卡"),
                     hint(4, "VTextField", "有多张已保存的卡时用来挑选", model="card_last4", label="已保存卡的后 4 位"),
                 ]},
@@ -858,7 +943,7 @@ class OyunforGiftCard(_PluginBase):
             "enabled": False, "notify": True, "onlyonce": False, "dry_run": True,
             "cookie": "", "username": "", "password": "",
             "amount": "250", "product_url": "", "quantity": 1,
-            "pay_mode": "balance", "card_use_saved": True, "card_last4": "",
+            "pay_mode": "binance", "pay_timeout": 15, "card_use_saved": True, "card_last4": "",
             "card_number": "", "card_holder": "", "card_expiry": "", "card_cvv": "",
             "max_total": 2000, "daily_limit": 3, "verify_timeout": 300,
             "verify_code": "", "cron": "",
@@ -872,7 +957,14 @@ class OyunforGiftCard(_PluginBase):
         blocks: List[dict] = []
         job = self._job
         if job:
-            if job.waiting:
+            if job.waiting == "binance":
+                info = job.pay_info
+                text = (f"金额 {info.get('amount') or '?'} {info.get('currency') or ''}，用币安 App 扫下面的二维码"
+                        + (f"，或打开付款链接：{(info.get('links') or [''])[0]}" if info.get("links") else "")
+                        + f"。付好后会自动取码；没动静就发 {self._cmd('paid')}。")
+                blocks.append({"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "class": "mb-3",
+                                                                "title": "等待你用币安付款", "text": text}})
+            elif job.waiting:
                 text = (f"{VERIFY_KIND_TEXT.get(job.waiting, '等待验证')}。发送 {self._cmd('code')} 验证码，"
                         f"或在插件设置的「验证码」框填写后保存；在 App 中确认的话页面会自动继续。")
                 blocks.append({"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "class": "mb-3",
@@ -888,6 +980,10 @@ class OyunforGiftCard(_PluginBase):
                    f"（{account.get('time', '')}）"
             blocks.append({"component": "VAlert", "props": {"type": "success" if account.get("logged_in") else "warning",
                                                             "variant": "tonal", "class": "mb-3", "text": text}})
+        if job and job.waiting == "binance" and job.qr_path and Path(job.qr_path).exists():
+            qr_data = base64.b64encode(Path(job.qr_path).read_bytes()).decode("ascii")
+            blocks.append({"component": "VImg", "props": {"src": f"data:image/png;base64,{qr_data}",
+                                                          "max-width": 320, "class": "mb-3"}})
         shot = self.get_data("last_screenshot")
         if job and job.screenshot:
             shot = str(job.screenshot)
@@ -896,7 +992,9 @@ class OyunforGiftCard(_PluginBase):
             blocks.append({"component": "VExpansionPanels", "props": {"class": "mb-3"}, "content": [{
                 "component": "VExpansionPanel", "props": {"title": f"最近一次截图：{Path(shot).parent.name}/{Path(shot).name}"},
                 "content": [{"component": "VExpansionPanelText", "content": [
-                    {"component": "VImg", "props": {"src": f"data:image/jpeg;base64,{data}", "max-height": 900}}]}]}]})
+                    {"component": "VImg", "props": {
+                        "src": f"data:image/{'png' if str(shot).endswith('.png') else 'jpeg'};base64,{data}",
+                        "max-height": 900}}]}]}]})
         history = sorted(self._history(), key=lambda item: item.get("date", ""), reverse=True)
         if not history:
             blocks.append({"component": "VAlert", "props": {
@@ -912,7 +1010,7 @@ class OyunforGiftCard(_PluginBase):
                 {"component": "td", "text": item.get("trigger", "")},
                 {"component": "td", "text": f"{item.get('product', '')} × {item.get('quantity', 1)}"},
                 {"component": "td", "text": "-" if total is None else f"{total:.2f}"},
-                {"component": "td", "text": ("余额" if item.get("pay_mode") == "balance" else "银行卡")
+                {"component": "td", "text": PAY_MODE_SHORT.get(item.get("pay_mode"), item.get("pay_mode") or "")
                                             + ("·演练" if item.get("dry_run") else "")},
                 {"component": "td", "content": [{"component": "VChip", "props": {
                     "color": STATUS_COLOR.get(item.get("code"), "error"), "size": "small", "variant": "tonal"},

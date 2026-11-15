@@ -52,6 +52,10 @@ class Site:
         requests.get(f"{URL}/__admin/reset", timeout=5)
 
     @staticmethod
+    def binance_pay(order):
+        requests.get(f"{URL}/__admin/binance_pay", params={"order": order}, timeout=5)
+
+    @staticmethod
     def approve(order):
         requests.get(f"{URL}/__admin/approve", params={"order": order}, timeout=5)
 
@@ -65,7 +69,7 @@ def make_config(**overrides):
         "enabled": True, "notify": True, "onlyonce": False, "dry_run": False,
         "cookie": "oyf_session=VALID", "username": "", "password": "",
         "amount": "250", "product_url": "", "quantity": 1,
-        "pay_mode": "balance", "card_use_saved": False, "card_last4": "",
+        "pay_mode": "balance", "pay_timeout": 15, "card_use_saved": False, "card_last4": "",
         "card_number": "", "card_holder": "", "card_expiry": "", "card_cvv": "",
         "max_total": 2000, "daily_limit": 0, "verify_timeout": 120,
         "verify_code": "", "cron": "", "use_proxy": False, "proxy_url": "", "nav_timeout": 30,

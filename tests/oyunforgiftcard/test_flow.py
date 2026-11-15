@@ -286,7 +286,7 @@ def test_page_and_form_render(oyun, site):
 
     walk(form)
     assert models == set(model.keys()) - {"history_days"}
-    assert model["dry_run"] is True and model["pay_mode"] == "balance"
+    assert model["dry_run"] is True and model["pay_mode"] == "binance"
     page = oyun.get_page()
     assert "暂无记录" in json.dumps(page, ensure_ascii=False)
     run(oyun)

@@ -67,7 +67,7 @@ def test_host_loaded_plugin(host):
     client, instance = host
     resp = client.get("/api/v1/plugin/installed")
     assert resp.status_code == 200 and PID in resp.json()
-    assert instance.plugin_version == "1.0.0"
+    assert instance.plugin_version == "1.1.0"
     assert instance.get_state() is False
 
 
@@ -113,7 +113,7 @@ def test_commands_registered(host):
     from app.command import Command
 
     commands = Command().get_commands()
-    for name in ("/oyunfor_buy", "/oyunfor_code", "/oyunfor_cancel", "/oyunfor_status"):
+    for name in ("/oyunfor_buy", "/oyunfor_code", "/oyunfor_paid", "/oyunfor_cancel", "/oyunfor_status"):
         assert name in commands, list(commands.keys())
 
 
@@ -183,6 +183,29 @@ def test_card_purchase_with_code_from_api_and_button(host):
                                                       "channel": None})
     assert wait_idle(instance, 60)
     assert instance.get_data("history")[-1]["code"] == "cancelled"
+
+
+def test_binance_qr_endpoint_is_anonymous_with_token(host):
+    """MoviePilot 取二维码图片时不带登录信息：接口要匿名可用，但必须带对一次性令牌"""
+    client, instance = host
+    Site.reset()
+    assert client.put(f"/api/v1/plugin/{PID}", json=make_config(pay_mode="binance")).json()["success"]
+    instance.del_data("known_codes")
+    start = len(instance.messages)
+    ok, message = instance.start_purchase()
+    assert ok, message
+    prompt = wait_message(instance, "请用币安付款", start=start)
+    assert prompt, instance.messages[start:]
+    token = instance._job.qr_token
+    path = f"/api/v1/plugin/{PID}/qr"
+    resp = client.get(path, params={"token": token}, headers={"Authorization": "Bearer invalid"})
+    assert resp.status_code == 200 and resp.headers["content-type"] == "image/png"
+    assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert client.get(path, params={"token": "x" * 32}).status_code == 404
+    Site.binance_pay(1001)
+    assert wait_idle(instance, 90)
+    assert instance.get_data("history")[-1]["code"] == "success"
+    assert client.get(path, params={"token": token}).status_code == 404
 
 
 def test_debug_zip_endpoint(host):

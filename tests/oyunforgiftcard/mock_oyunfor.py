@@ -41,6 +41,9 @@ def _default_state():
         "success_shows_code": True,
         "checkout_style": "radios",   # radios / buttons
         "show_buy_now": True,
+        "binance_mode": "onsite",      # onsite / hosted
+        "binance_autoredirect": True,
+        "binance_paid": [],
         "saved_card": False,
         "cart": [],
         "orders": {1000: {"id": 1000, "product": "100", "qty": 1, "total": 105.0, "status": "Tamamlandı",
@@ -137,7 +140,8 @@ class Handler(BaseHTTPRequestHandler):
 [role=dialog]{{position:fixed;top:30%;left:30%;background:#fff;border:2px solid #333;padding:20px}}</style></head>
 <body><header><a href="/">Oyunfor</a> <a href="{CATEGORY}">App Store</a> {nav} <a href="/sepet">Sepetim ({cart_n})</a></header>
 <main>{body}</main>
-<footer>Oyunfor'u tercih ettiğiniz için teşekkür ederiz. <a href="/iletisim">İletişim</a></footer></body></html>"""
+<footer>Oyunfor'u tercih ettiğiniz için teşekkür ederiz. <a href="/iletisim">İletişim</a>
+<a href="https://www.binance.com/en">Binance</a></footer></body></html>"""
 
     def log(self, item):
         with LOCK:
@@ -183,6 +187,19 @@ class Handler(BaseHTTPRequestHandler):
             order = int(query.get("order", "0"))
             return self.send_html(self.page("Kart ile Ödeme", f"""<h1>Kart ile Ödeme</h1>
 <p>Sipariş #{order}</p><iframe id="paytr" src="{self.gateway}/paytr/form?order={order}" style="width:700px;height:520px;border:1px solid #ccc"></iframe>"""))
+        if path == "/static/binance-logo.svg":
+            return self.send_svg('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#f0b90b"/></svg>')
+        if path == "/odeme/binance/qr.svg":
+            return self.send_svg(self.qr_svg(query.get("order", "0")))
+        if path == "/odeme/binance":
+            return self.send_html(self.binance_onsite(int(query.get("order", "0"))))
+        if path == "/odeme/binance/status" or path.startswith("/binance/status"):
+            order = int(query.get("order", "0"))
+            with LOCK:
+                paid = order in STATE["binance_paid"]
+            return self.send_json({"paid": paid})
+        if path.startswith("/binance/checkout/"):
+            return self.send_html(self.binance_hosted(int(path.rsplit("/", 1)[-1])))
         if path == "/paytr/form":
             return self.send_html(self.gateway_form(int(query.get("order", "0"))))
         if path == "/acs":
@@ -317,11 +334,13 @@ class Handler(BaseHTTPRequestHandler):
         if style == "buttons":
             methods = f"""<p>Bakiyeniz: {money(balance)} TL</p>
 <button type="submit" name="method" value="bakiye" class="pay">Bakiye ile Öde</button>
-<button type="submit" name="method" value="kart" class="pay">Kredi Kartı ile Öde</button>"""
+<button type="submit" name="method" value="kart" class="pay">Kredi Kartı ile Öde</button>
+<button type="submit" name="method" value="binance" class="pay">Binance Pay ile Öde</button>"""
         else:
             methods = f"""<div class="payment-methods">
 <label><input type="radio" name="method" value="bakiye"> Bakiye ile Öde (Bakiyeniz: {money(balance)} TL)</label>
-<label><input type="radio" name="method" value="kart"> Kredi Kartı / Banka Kartı</label></div>
+<label><input type="radio" name="method" value="kart"> Kredi Kartı / Banka Kartı</label>
+<label><input type="radio" name="method" value="binance"> <img src="/static/binance-logo.svg" class="pay-logo" width="24" height="24" alt="Binance"> Binance Pay (USDT)</label></div>
 <button type="submit" class="btn-pay">Ödemeyi Tamamla</button>"""
         return self.page("Ödeme", f"""<h1>Ödeme</h1>{err}<ul>{lines}</ul>
 <div class="summary"><div>Ara Toplam: {money(total)} TL</div><div class="grand">Genel Toplam: {money(total)} TL</div></div>
@@ -355,6 +374,11 @@ class Handler(BaseHTTPRequestHandler):
             if data.get("method") == "kart":
                 STATE["orders"][order_id] = order
                 return self.redirect(f"/odeme/kart?order={order_id}")
+            if data.get("method") == "binance":
+                STATE["orders"][order_id] = order
+                if STATE["binance_mode"] == "hosted":
+                    return self.redirect(f"{self.gateway}/binance/checkout/{order_id}")
+                return self.redirect(f"/odeme/binance?order={order_id}")
         STATE["next_order"] -= 1
         return self.send_html(self.checkout_page("Lütfen ödeme yöntemi seçin."))
 
@@ -436,6 +460,62 @@ setInterval(async () => {{
             self.mark_paid(order)
         return self.send_html(self.top_redirect(f"{self.main}/siparis/basarili?order={order}"))
 
+    def send_svg(self, body):
+        raw = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    @staticmethod
+    def qr_svg(seed):
+        cells = []
+        n = 25
+        for y in range(n):
+            for x in range(n):
+                if (x * 7 + y * 13 + int(seed or 0)) % 3 == 0 or (x < 7 and y < 7) or (x > 17 and y < 7) or (x < 7 and y > 17):
+                    cells.append(f'<rect x="{x * 8}" y="{y * 8}" width="8" height="8"/>')
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="#fff"/><g fill="#000">{"".join(cells)}</g></svg>'
+
+    @staticmethod
+    def usdt(order):
+        total = STATE["orders"].get(order, {}).get("total", 0)
+        return f"{total / 42:.2f}".replace(".", ",")
+
+    def binance_onsite(self, order):
+        with LOCK:
+            amount = self.usdt(order)
+            auto = STATE["binance_autoredirect"]
+        poll = f"""<script>
+setInterval(async () => {{ const r = await fetch('/odeme/binance/status?order={order}'); const j = await r.json();
+  if (j.paid) location.href = '/siparis/basarili?order={order}'; }}, 800);
+</script>""" if auto else ""
+        return self.page("Binance Pay", f"""<h1>Binance Pay ile Ödeme</h1><p>Sipariş #{order}</p>
+<div class="binance-pay-box"><img class="qr-code" src="/odeme/binance/qr.svg?order={order}" width="220" height="220" alt="Binance Pay QR">
+<p>Binance uygulamanızla QR kodu okutun.</p><p class="amount">Ödenecek tutar: {amount} USDT</p>
+<p>Kalan süre: <span id="t">14:59</span></p>
+<a href="https://app.binance.com/payment/secpay?linkToken=LT{order}abc" class="btn">Binance uygulamasında aç</a></div>{poll}""")
+
+    def binance_hosted(self, order):
+        with LOCK:
+            amount = self.usdt(order).replace(",", ".")
+            paid = order in STATE["binance_paid"]
+        if paid:
+            return f"""<!doctype html><html><head><meta charset="utf-8"><title>Binance Pay</title></head><body>
+<h2>Payment Successful</h2><p>Redirecting to merchant...</p>
+<script>setTimeout(() => location.href = {json.dumps(self.main + '/siparis/basarili?order=' + str(order))}, 1500);</script></body></html>"""
+        return f"""<!doctype html><html><head><meta charset="utf-8"><title>Binance Pay Checkout</title></head><body>
+<h2>Binance Pay</h2><p>Merchant: OYUNFOR</p><p>{amount} USDT</p><p>Expires in 59:30</p>
+<canvas class="qrcode" width="240" height="240" id="qr"></canvas>
+<p>Scan with the Binance app to pay</p>
+<a href="bnc://app.binance.com/payment/secpay?linkToken=HT{order}">Pay with Binance App</a>
+<script>
+const c = document.getElementById('qr').getContext('2d'); c.fillStyle = '#fff'; c.fillRect(0, 0, 240, 240); c.fillStyle = '#000';
+for (let y = 0; y < 24; y++) for (let x = 0; x < 24; x++) if ((x * 5 + y * 11) % 3 === 0) c.fillRect(x * 10, y * 10, 10, 10);
+setInterval(async () => {{ const r = await fetch('/binance/status?order={order}'); const j = await r.json(); if (j.paid) location.reload(); }}, 800);
+</script></body></html>"""
+
     @staticmethod
     def top_redirect(url):
         return f"<!doctype html><html><body><p>Yönlendiriliyorsunuz...</p><script>window.top.location.href = {json.dumps(url)};</script></body></html>"
@@ -492,12 +572,18 @@ setInterval(async () => {{
                 for key, value in query.items():
                     if key == "balance":
                         STATE[key] = float(value)
-                    elif key in ("stock", "require_sms_login", "success_shows_code", "saved_card", "show_buy_now"):
+                    elif key in ("stock", "require_sms_login", "success_shows_code", "saved_card", "show_buy_now",
+                                 "binance_autoredirect"):
                         STATE[key] = value in ("1", "true", "yes")
                     elif key == "cart":
                         STATE["cart"] = [{"product": p, "qty": 1} for p in value.split(",") if p]
                     else:
                         STATE[key] = value
+                return self.send_json({"ok": True})
+            if path == "/__admin/binance_pay":
+                order = int(query.get("order", "0"))
+                STATE["binance_paid"].append(order)
+                self.mark_paid(order)
                 return self.send_json({"ok": True})
             if path == "/__admin/approve":
                 STATE["approved"].append(int(query.get("order", "0")))
