@@ -76,6 +76,11 @@ DIALOG_SCOPE = ("[role=dialog],[role=alertdialog],.modal.show,.modal.in,.swal2-p
                 "[class*=minicart i],[class*=mini-cart i],[class*=side-cart i],[class*=sepet-popup i],[class*=cart-popup i]")
 # 购物车页「下一步」按钮里这些字样可能直接下单：演练时不点（普通链接则直接打开链接）
 RISKY_NEXT_RE = re.compile(r"(satin al|tamamla|onayla|\bode\b|odeme yap|\bpay\b|place order|confirm|bitir)")
+# 购物车页上这些「下一步」是去付款页（Oyunfor 购物车「Sipariş Özeti」上的「Alışverişi Tamamla」已确认是去付款页）
+SAFE_NEXT_RE = re.compile(r"^(alisverisi tamamla|odemeye gec|odeme adimina gec|odeme sayfasina (git|gec)|sepeti onayla|"
+                          r"kasaya git|devam et)\b")
+# 购物车地址：按路径段精确匹配（避免把 /mocanetwork/yemeksepeti 这类当成购物车）
+CART_PATH_RE = re.compile(r"(^|/)(sepet|sepetim|sepetiniz|alisveris-sepeti|cart|basket|shopping-cart)(/|$|\.)", re.I)
 CART_PATHS = ("/sepet", "/sepetim", "/sepet.html", "/alisveris-sepeti", "/cart")
 SUCCESS_TEXT = [
     r"siparis(iniz)? (basariyla )?(alindi|olusturuldu|tamamlandi|onaylandi)",
@@ -360,7 +365,7 @@ JS_PRODUCT_INFO = "([priceSel]) => {" + _JS_FOLD + r"""
 """
 
 JS_FIND_TOTAL = "() => {" + _JS_FOLD + r"""
-    const labels = /(genel toplam|odenecek tutar|toplam tutar|odenecek|toplam|grand total|order total|total)/;
+    const labels = /(genel toplam|odenecek tutar|toplam tutar|odenecek|toplam|\btutar\b|grand total|order total|total)/;
     const out = [];
     for (const el of document.querySelectorAll('div,li,tr,p,span,td,th,dt,dd,strong,b,label')) {
         if (!visible(el)) continue;
@@ -598,8 +603,12 @@ JS_PRICE_COUNT = "() => {" + _JS_FOLD + r"""
 # 指向购物车的链接（文字或纯图标），按地址判断
 JS_CART_LINK = r"""
 () => {
-    const ok = a => { const h = (a.getAttribute('href') || '').toLowerCase();
-        return /(sepet|\/cart|basket)/.test(h) && !/(ekle|add|sil|remove|javascript)/.test(h); };
+    const seg = /(^|\/)(sepet|sepetim|sepetiniz|alisveris-sepeti|cart|basket|shopping-cart)(\/|$|\.)/i;
+    const ok = a => {
+        const h = (a.getAttribute('href') || '').toLowerCase();
+        if (!h || /(ekle|add|sil|remove|javascript)/.test(h)) return false;
+        try { return seg.test(new URL(a.href, location.href).pathname); } catch (e) { return false; }
+    };
     const all = Array.from(document.querySelectorAll('a[href]')).filter(ok);
     const vis = all.filter(a => { const r = a.getBoundingClientRect(); return r.width > 1 && r.height > 1; });
     const pick = vis[0] || all[0];
@@ -1372,7 +1381,8 @@ class OyunforShop:
         except Exception:  # noqa
             lines = []
         # 优先「Genel Toplam / Ödenecek Tutar」，其次「Toplam」
-        ranked = sorted(lines, key=lambda s: (0 if re.search(r"(genel toplam|odenecek)", fold(s)) else 1, len(s)))
+        ranked = sorted(lines, key=lambda s: (0 if re.search(r"(genel toplam|odenecek)", fold(s)) else
+                                              1 if re.search(r"toplam", fold(s)) else 2, len(s)))
         for line in ranked:
             values = find_money(line)
             if values:
@@ -1464,7 +1474,7 @@ class OyunforShop:
         """
         text = found.get("text") or ""
         href = (found.get("href") or "").strip()
-        if dry_run and RISKY_NEXT_RE.search(text):
+        if dry_run and RISKY_NEXT_RE.search(text) and not SAFE_NEXT_RE.search(text):
             if href and not href.lower().startswith(("javascript", "#")):
                 self.note(f"演练：「{text}」是普通链接，直接打开（不提交任何表单）")
                 self.goto(urljoin(self.page.url, href), "结算页")
@@ -1521,7 +1531,7 @@ class OyunforShop:
     def _looks_like_cart(self) -> bool:
         if not self._page_ok():
             return False
-        if re.search(r"(sepet|cart|basket)", urlparse(self.page.url).path, re.I):
+        if CART_PATH_RE.search(urlparse(self.page.url).path):
             return True
         return bool(self.find("checkout", maxLen=40, patterns=[r"^odemeye gec\b", r"^alisverisi tamamla\b",
                                                                r"^sepeti onayla\b"]))

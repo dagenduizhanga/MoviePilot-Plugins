@@ -149,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
         return f"""<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>{html.escape(title)} - Oyunfor</title>
 <style>body{{font-family:sans-serif;margin:0}} header,main,footer{{padding:12px}} .hidden{{display:none}}
 [role=dialog]{{position:fixed;top:30%;left:30%;background:#fff;border:2px solid #333;padding:20px}}</style></head>
-<body><header><a href="/">Oyunfor</a> <a href="{CATEGORY}">App Store</a> {nav} {self.header_cart(cart_n)}</header>
+<body><header><a href="/">Oyunfor</a> <a href="{CATEGORY}">App Store</a> <a href="/mocanetwork/yemeksepeti">Yemeksepeti x Oyunfor</a> {nav} {self.header_cart(cart_n)}</header>
 <main>{body}</main>
 <footer>Oyunfor'u tercih ettiğiniz için teşekkür ederiz. <a href="/iletisim">İletişim</a>
 <a href="https://www.binance.com/en">Binance</a></footer></body></html>"""
@@ -168,6 +168,10 @@ class Handler(BaseHTTPRequestHandler):
         self.log({"method": "GET", "path": path})
         if path == "/":
             return self.send_html(self.page("Ana Sayfa", "<h1>Türkiye'nin epin sitesi</h1>"))
+        if path == "/mocanetwork/yemeksepeti":
+            # 地址里含「sepet」但不是购物车（真实站点上的活动页）
+            return self.send_html(self.page("Yemeksepeti x Oyunfor Kampanyası",
+                                            "<h1>Yemeksepeti x Oyunfor Kampanyası</h1><p>Kampanya detayları</p>"))
         if path == "/giris":
             return self.send_html(self.page("Giriş Yap", """<h1>Üye Girişi</h1>
 <form method="post" action="/giris"><label>E-posta</label><input type="email" name="email" placeholder="E-posta adresiniz">
@@ -410,7 +414,7 @@ setTimeout(() => {
 <td><form method="post" action="/sepet/sil"><input type="hidden" name="index" value="{n}"><button type="submit" title="Sil" class="btn-remove">✕</button></form></td></tr>"""
                        for n, i in enumerate(cart))
         return self.page("Sepetim", f"""<h1>Sepetim</h1><table>{rows}</table>
-<div class="cart-total">Toplam: {money(total)} TL</div><a href="/" class="btn">Alışverişe Devam Et</a>
+<div class="summary"><h3>Sipariş Özeti</h3><div class="cart-total">Tutar: {total:.2f} TL</div></div><a href="/" class="btn">Alışverişe Devam Et</a>
 {self.cart_button()}""")
 
     @staticmethod
@@ -419,6 +423,10 @@ setTimeout(() => {
             kind = STATE["cart_button"]
         if kind == "satinal_link":
             return '<a href="/odeme" class="btn btn-primary">SATIN AL</a>'
+        if kind == "tamamla_submit":
+            # 仿真实站点购物车右侧「Sipariş Özeti」里的按钮
+            return ('<form method="post" action="/sepet/onay"><button type="submit" class="btn btn-success">'
+                    '<i class="fa fa-credit-card"></i> Alışverişi Tamamla</button></form>')
         if kind == "satinal_submit":
             return '<form method="post" action="/sepet/onay"><button type="submit" class="btn btn-primary">SATIN AL</button></form>'
         return '<a href="/odeme" class="btn btn-primary">Ödemeye Geç</a>'

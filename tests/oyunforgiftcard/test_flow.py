@@ -582,3 +582,20 @@ def test_balance_option_named_oyunfor_bakiyesi(oyun, site):
     record = run(oyun)
     assert record["code"] == "success", record
     assert site.posts("/odeme")[-1]["data"]["method"] == "bakiye"
+
+
+
+def test_real_like_cart_page_with_alisverisi_tamamla(oyun, site):
+    """真实购物车：页头有「Yemeksepeti」活动链接（地址里含 sepet，不能当成购物车），购物车只有图标；
+    「Sipariş Özeti」里的「Alışverişi Tamamla」是提交按钮，用户确认它是去付款页 —— 演练也要点它"""
+    site.set(header_cart="icon", cart_button="tamamla_submit", cart="100")
+    oyun.init_plugin(make_config(dry_run=True, amount="100"))
+    record = run(oyun)
+    assert record["code"] == "dry_run", record
+    assert "付款前一步" in record["message"] and record["total"] == 105.0, record
+    assert len(site.posts("/sepet/onay")) == 1 and not site.posts("/odeme")
+    # 访问过的页面里不能有活动页
+    assert not [item for item in site.state()["log"] if item["path"] == "/mocanetwork/yemeksepeti"]
+    oyun.init_plugin(make_config(amount="100"))
+    record = run(oyun)
+    assert record["code"] == "success", record
