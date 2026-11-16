@@ -45,9 +45,13 @@ def test_balance_purchase_reveals_code_on_success_page(oyun, site):
     assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
     assert record["total"] == 262.5
     assert site.state()["balance"] == 1237.5
-    assert oyun.get_data("known_codes") == ["X01001QZ1ABCDEFG"]
+    # 查重只存不可逆指纹，不存兑换码明文
+    assert oyun.get_data("known_codes") is None and len(oyun.get_data("known_fp")) == 1
+    assert "X01001QZ1ABCDEFG" not in json.dumps(oyun.get_data("known_fp"))
     final = oyun.messages[-1]
     assert "购买成功" in final["title"] and "X01001QZ1ABCDEFG" in final["text"]
+    # 含兑换码的通知不写进 MoviePilot 的消息历史
+    assert final.get("save_history") is False
     # 结算页页脚的「teşekkür ederiz」不能被当成付款成功：必须真的提交了订单
     assert len(site.posts("/odeme")) == 1
 
@@ -320,7 +324,7 @@ def test_cloakbrowser_engine(oyun, site, monkeypatch):
     oyun.init_plugin(make_config(dry_run=True))
     record = run(oyun)
     assert record["code"] == "dry_run", record
-    steps = (oyun.get_data_path() / "runs" / record["run"] / "steps.log").read_text(encoding="utf-8")
+    steps = oyun._read_run_file(oyun.get_data_path() / "runs" / record["run"] / "steps.log.enc").decode("utf-8")
     assert "CloakBrowser" in steps
 
 
