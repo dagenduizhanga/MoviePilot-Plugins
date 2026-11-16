@@ -134,7 +134,7 @@ class OyunforGiftCard(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png"
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     # 插件作者
     plugin_author = "dagenduizhanga"
     # 作者主页
@@ -454,13 +454,16 @@ class OyunforGiftCard(_PluginBase):
             self._lock = threading.Lock()
         if not self._cookie and not (self._username and self._password):
             return False, "请先在插件设置中填写 Oyunfor Cookie（或账号密码）"
+        try:
+            config_amount: Optional[int] = int(re.sub(r"\D", "", self._amount)) or None
+        except ValueError:
+            config_amount = None
         if not amount and not product_url:
+            # 用设置：链接可以是分类页（按面额在里面挑）或商品页（面额要对得上）
             product_url = self._product_url
-            if not product_url:
-                try:
-                    amount = int(re.sub(r"\D", "", self._amount))
-                except ValueError:
-                    return False, "请先在插件设置中填写面额或商品链接"
+            amount = config_amount
+            if not product_url and not amount:
+                return False, "请先在插件设置中填写面额或商品链接"
         dry_run = self._dry_run or force_dry
         if self._pay_mode == "card" and not dry_run and not self._card_use_saved and not self._card().has_manual:
             return False, "银行卡模式需要填写完整的卡信息，或开启「使用网站已保存的卡」"
@@ -473,12 +476,12 @@ class OyunforGiftCard(_PluginBase):
         request = PurchaseRequest(amount=amount, product_url=product_url, quantity=quantity or self._quantity,
                                   pay_mode=self._pay_mode, dry_run=dry_run, max_total=self._max_total,
                                   card=self._card(), verify_timeout=self._verify_timeout,
-                                  pay_timeout=self._pay_timeout * 60,
+                                  pay_timeout=self._pay_timeout * 60, pick_amount=config_amount,
                                   known_codes=list(self.get_data("known_codes") or []))
         thread = threading.Thread(target=self._purchase_worker, args=(job, request), daemon=True,
                                   name=f"oyunfor-{job.id}")
         thread.start()
-        target = product_url or f"{amount} TL"
+        target = (f"{amount} TL（{product_url}）" if amount and product_url else product_url or f"{amount} TL")
         what = "演练" if dry_run else "购买"
         return True, f"开始{what}：{target} × {request.quantity}（{PAY_MODE_SHORT[self._pay_mode]}）"
 
@@ -869,10 +872,12 @@ class OyunforGiftCard(_PluginBase):
                 ]},
                 title("② 买什么"),
                 {"component": "VRow", "content": [
-                    hint(3, "VTextField", "如 100、250、500", model="amount", label="面额（TL）"),
+                    hint(3, "VTextField", "如 100、250、500；没有这个面额时用「100 - 2000 TL」自定义金额",
+                         model="amount", label="面额（TL）"),
                     hint(3, "VTextField", "每次买几张", model="quantity", label="数量", type="number"),
-                    hint(6, "VTextField", "填了就优先用链接，不按面额找", model="product_url", label="商品链接（可选）",
-                         placeholder="https://www.oyunfor.com/apple-store/..."),
+                    hint(6, "VTextField", "可以填整页的分类地址，插件按左边的面额在里面挑；也可以填单个商品页",
+                         model="product_url", label="商品链接（可选）",
+                         placeholder="https://www.oyunfor.com/apple-store/apple-store-itunes-gift-card"),
                 ]},
                 title("③ 怎么付：币安支付最省事（把付款码推给你，你在币安 App 付款）；余额要先充值；银行卡需要完成 3DS"),
                 {"component": "VRow", "content": [

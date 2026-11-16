@@ -15,15 +15,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 LOCK = threading.RLock()
+# 列表页结构仿照真实分类页截图：卡片 = 标题 + 价格（100.00 TL）+ DETAY + SEPETE EKLE，
+# 第一张是「100 - 2000 TL」自定义金额商品（Tutar giriniz. 输入框）
 PRODUCTS = {
-    "2500": {"slug": "2500-tl-tutarinda-app-store-itunes-hediye-karti",
+    "custom": {"slug": "100-2000-tl-app-store-card", "title": "100 - 2000 TL App Store Card",
+               "listing": "100 - 2000 TL App Store Card", "price": 0.0},
+    "2500": {"slug": "2500-tl-tutarinda-app-store-itunes-hediye-karti", "listing": "2500 TL App Store Card",
              "title": "2500 TL Tutarında App Store & iTunes Hediye Kartı", "price": 2600.0},
-    "250": {"slug": "250-tl-tutarinda-app-store-itunes-hediye-karti",
+    "250": {"slug": "250-tl-tutarinda-app-store-itunes-hediye-karti", "listing": "250 TL App Store Card",
             "title": "250 TL Tutarında App Store & iTunes Hediye Kartı", "price": 262.5},
-    "100": {"slug": "100-tl-tutarinda-app-store-itunes-hediye-karti",
+    "100": {"slug": "100-tl-tutarinda-app-store-itunes-hediye-karti", "listing": "100 TL App Store Card",
             "title": "100 TL Tutarında App Store & iTunes Hediye Kartı", "price": 105.0},
     # 与真实站点一样：链接写 1000，页面却是 2000 TL
-    "1000": {"slug": "1000-tl-tutarinda-app-store-itunes-hediye-karti",
+    "1000": {"slug": "1000-tl-tutarinda-app-store-itunes-hediye-karti", "listing": "2000 TL App Store Card",
              "title": "2000 TL Tutarında App Store & iTunes Hediye Kartı", "price": 2050.0},
 }
 CATEGORY = "/apple-store/apple-store-itunes-gift-card"
@@ -165,9 +169,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/cikis":
             return self.redirect("/", {"Set-Cookie": "oyf_session=; Path=/; Max-Age=0"})
         if path == CATEGORY:
-            items = "".join(f'<div class="product-card"><a href="{CATEGORY}/{p["slug"]}">{html.escape(p["title"])}</a>'
-                            f'<span class="price">{money(p["price"])} TL</span></div>' for p in PRODUCTS.values())
-            return self.send_html(self.page("Apple Store", f"<h1>App Store Hediye Kartları</h1>{items}"))
+            return self.send_html(self.category_page(added=query.get("added") == "1", error=query.get("hata", "")))
         if path.startswith(CATEGORY + "/"):
             slug = path.rsplit("/", 1)[-1]
             product = next((k for k, p in PRODUCTS.items() if p["slug"] == slug), None)
@@ -187,6 +189,8 @@ class Handler(BaseHTTPRequestHandler):
             order = int(query.get("order", "0"))
             return self.send_html(self.page("Kart ile Ödeme", f"""<h1>Kart ile Ödeme</h1>
 <p>Sipariş #{order}</p><iframe id="paytr" src="{self.gateway}/paytr/form?order={order}" style="width:700px;height:520px;border:1px solid #ccc"></iframe>"""))
+        if path == "/static/apple-card.svg":
+            return self.send_svg('<svg xmlns="http://www.w3.org/2000/svg" width="110" height="72"><rect width="110" height="72" rx="6" fill="#1e90ff"/></svg>')
         if path == "/static/binance-logo.svg":
             return self.send_svg('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#f0b90b"/></svg>')
         if path == "/odeme/binance/qr.svg":
@@ -255,12 +259,23 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/sepet/ekle", "/sepet/hemen-al"):
             product = data.get("product")
             qty = max(1, int(data.get("adet") or 1))
+            item = {"product": product, "qty": qty}
+            if product == "custom":
+                try:
+                    amount = float(f"{int(data.get('tutar') or 0)}.{int(data.get('kurus') or 0):02d}")
+                except ValueError:
+                    amount = 0
+                if not 100 <= amount <= 2000:
+                    return self.redirect(f"{CATEGORY}?hata=tutar")
+                item["price"] = amount
             with LOCK:
                 if not STATE["stock"]:
                     return self.redirect(f"{CATEGORY}/{PRODUCTS[product]['slug']}")
-                STATE["cart"].append({"product": product, "qty": qty})
+                STATE["cart"].append(item)
             if path == "/sepet/hemen-al":
                 return self.redirect("/odeme")
+            if data.get("from") == "liste":
+                return self.redirect(f"{CATEGORY}?added=1")
             return self.redirect(f"{CATEGORY}/{PRODUCTS[product]['slug']}?added=1")
         if path == "/sepet/sil":
             idx = int(data.get("index") or 0)
@@ -304,8 +319,32 @@ class Handler(BaseHTTPRequestHandler):
 <p>Türkiye bölgesinden kullanılabilir.</p>{buttons}{dialog}"""
         return self.page(p["title"], body)
 
+    @staticmethod
+    def item_price(item):
+        return item.get("price") or PRODUCTS[item["product"]]["price"]
+
     def cart_total(self):
-        return sum(PRODUCTS[i["product"]]["price"] * i["qty"] for i in STATE["cart"])
+        return sum(self.item_price(i) * i["qty"] for i in STATE["cart"])
+
+    def category_page(self, added=False, error=""):
+        with LOCK:
+            stock = STATE["stock"]
+        cards = []
+        for key, p in PRODUCTS.items():
+            detail = f'<a href="{CATEGORY}/{p["slug"]}" class="btn btn-outline">ℹ DETAY</a>'
+            disabled = "" if stock else " disabled"
+            if key == "custom":
+                body = ('<div class="amount"><input type="text" name="tutar" placeholder="Tutar giriniz."> . '
+                        '<input type="text" name="kurus" placeholder="TL" maxlength="2" style="width:50px"></div>')
+            else:
+                body = f'<div class="product-price">{p["price"]:.2f} TL</div>'
+            cards.append(f"""<div class="product-row"><img src="/static/apple-card.svg" width="110" height="72" alt="">
+<div class="product-name">{html.escape(p["listing"])}</div>
+<form method="post" action="/sepet/ekle"><input type="hidden" name="product" value="{key}"><input type="hidden" name="from" value="liste">
+{body}{detail} <button type="submit" class="btn btn-success"{disabled}>🛒 SEPETE EKLE</button></form></div>""")
+        toast = '<div class="toast">Ürün sepete eklendi.</div>' if added else ""
+        err = '<div class="alert">Lütfen 100 - 2000 TL arasında bir tutar giriniz.</div>' if error else ""
+        return self.page("Apple Store", f"<h1>Apple Store</h1>{toast}{err}<div class='product-list'>{''.join(cards)}</div>")
 
     def cart_page(self):
         with LOCK:
@@ -314,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
         if not cart:
             return self.page("Sepetim", "<h1>Sepetim</h1><p>Sepetinizde ürün bulunmamaktadır.</p>")
         rows = "".join(f"""<tr><td>{html.escape(PRODUCTS[i['product']]['title'])}</td><td>{i['qty']}</td>
-<td>{money(PRODUCTS[i['product']]['price'] * i['qty'])} TL</td>
+<td>{money(self.item_price(i) * i['qty'])} TL</td>
 <td><form method="post" action="/sepet/sil"><input type="hidden" name="index" value="{n}"><button type="submit" title="Sil" class="btn-remove">✕</button></form></td></tr>"""
                        for n, i in enumerate(cart))
         return self.page("Sepetim", f"""<h1>Sepetim</h1><table>{rows}</table>

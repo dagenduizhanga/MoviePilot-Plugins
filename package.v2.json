@@ -15,11 +15,12 @@
     "name": "Oyunfor 礼品卡购买",
     "description": "在 oyunfor.com 自动购买 App Store 礼品卡（TL）：把币安付款码推给你，付款后推送兑换码；也支持余额、银行卡（3DS 转发）。",
     "labels": "Oyunfor,App Store,礼品卡,币安",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "icon": "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png",
     "author": "dagenduizhanga",
     "level": 1,
     "history": {
+      "v1.2.0": "商品链接可以填整页分类地址：按面额在商品卡片里挑，点该卡自己的 Sepete Ekle；没有该面额时用「100 - 2000 TL」自定义金额；按真实分类页修正按钮识别（图标前缀）；应付金额过低也会停下；银行卡：支付页报错时直接判失败，不再把持卡人输入框误认成验证码框",
       "v1.1.0": "新增币安支付（默认）：推送付款链接与二维码图片，付款后自动取码；/oyunfor_paid 与「我已付款」按钮；修复页脚感谢语被误判为付款成功",
       "v1.0.0": "首个版本：浏览器自动下单（余额 / 银行卡），3DS 验证码与 App 确认通过消息、按钮、网页或 API 转发；默认演练模式；单笔金额与每日次数限制；兑换码自动提取；每步截图与诊断包"
     }

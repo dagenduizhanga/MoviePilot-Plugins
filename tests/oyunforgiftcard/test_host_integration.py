@@ -67,7 +67,7 @@ def test_host_loaded_plugin(host):
     client, instance = host
     resp = client.get("/api/v1/plugin/installed")
     assert resp.status_code == 200 and PID in resp.json()
-    assert instance.plugin_version == "1.1.0"
+    assert instance.plugin_version == "1.2.0"
     assert instance.get_state() is False
 
 

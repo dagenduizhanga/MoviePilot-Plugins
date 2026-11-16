@@ -13,6 +13,7 @@ from app.schemas.types import EventType
 from .conftest import CARD, make_config, run, wait_idle, wait_message
 
 OLD_CODE = "XOLDCODE00000001"
+CATEGORY = "/apple-store/apple-store-itunes-gift-card"
 
 
 def orders(site):
@@ -227,8 +228,9 @@ def test_limits_and_guards(oyun, site):
     site.set(stock="0")
     assert run(oyun)["code"] == "out_of_stock"
 
+    # 商品页链接写 1000，页面却是 2000 TL：面额对不上就停
     site.reset()
-    record = run(oyun, amount=1000)
+    record = run(oyun, amount=1000, product_url=f"{site.url}{CATEGORY}/1000-tl-tutarinda-app-store-itunes-hediye-karti")
     assert record["code"] == "failed" and "2000" in record["message"], record
     assert not site.posts("/odeme")
 
@@ -319,3 +321,74 @@ def test_code_sent_before_verification_page(oyun, site):
     record = oyun.get_data("history")[-1]
     assert record["code"] == "success", record
     assert site.state()["otp_attempts"] == 1
+
+
+
+# ---------------------------------------------------------------- 整页链接（分类页）里按面额挑商品
+def _cart_posts(site):
+    return [item["data"] for item in site.posts("/sepet/ekle")]
+
+
+def test_listing_url_picks_card_by_amount(oyun, site):
+    """商品链接填整页分类地址，按面额挑：不能点到第一张「100 - 2000 TL」自定义金额卡"""
+    oyun.init_plugin(make_config(product_url=f"{site.url}{CATEGORY}", amount="100"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert record["product"] == "100 TL App Store Card"
+    assert record["total"] == 105.0
+    assert [item["product"] for item in _cart_posts(site)] == ["100"]
+    assert record["codes"] == ["X01001QZ1ABCDEFG"]
+
+
+def test_listing_250_not_2500(oyun, site):
+    oyun.init_plugin(make_config(product_url=f"{site.url}{CATEGORY}", amount="250"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert [item["product"] for item in _cart_posts(site)] == ["250"]
+
+
+def test_custom_amount_card(oyun, site):
+    """固定面额里没有 150：用「100 - 2000 TL」自定义金额那一项，填 150"""
+    oyun.init_plugin(make_config(amount="150"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    posted = _cart_posts(site)
+    assert posted == [{"product": "custom", "from": "liste", "tutar": "150", "kurus": "00"}]
+    assert record["total"] == 150.0
+    assert record["codes"] == ["X01001QZ1ABCDEFG"]
+
+
+def test_amount_not_available(oyun, site):
+    oyun.init_plugin(make_config(amount="5000"))
+    record = run(oyun)
+    assert record["code"] == "failed", record
+    assert "5000" in record["message"]
+    assert not _cart_posts(site)
+
+
+def test_command_url_only_uses_configured_amount_on_listing(oyun, site):
+    oyun.init_plugin(make_config(amount="100", dry_run=True))
+    record = run(oyun, product_url=f"{site.url}{CATEGORY}")
+    assert record["code"] == "dry_run", record
+    assert record["product"] == "100 TL App Store Card"
+
+
+def test_single_product_page_url_with_dialog_and_quantity(oyun, site):
+    site.set(show_buy_now="0")
+    url = f"{site.url}{CATEGORY}/250-tl-tutarinda-app-store-itunes-hediye-karti"
+    oyun.init_plugin(make_config(product_url=url, amount="250"))
+    record = run(oyun, quantity=2)
+    assert record["code"] == "success", record
+    assert record["total"] == 525.0
+    assert len(record["codes"]) == 2
+
+
+def test_card_rejected_by_gateway_fails_fast(oyun, site):
+    """支付页提示卡信息有误：直接判失败，不把持卡人输入框当成验证码框、也不傻等到超时"""
+    config = _card_config()
+    config["card_number"] = "4000 0000 0000 0002"
+    oyun.init_plugin(config)
+    record = run(oyun, timeout=90)
+    assert record["code"] == "failed", record
+    assert "支付页提示" in record["message"] and "hatali" in record["message"]
+    assert not any("需要你验证付款" in (m.get("title") or "") for m in oyun.messages)

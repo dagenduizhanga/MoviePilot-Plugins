@@ -186,6 +186,28 @@ def extract_codes(text: Optional[str], custom: Optional[str] = None) -> List[str
     return found
 
 
+RANGE_RE = re.compile(r"(?<![\d.,])(\d{2,6})\s*(?:-|–|~|ile)\s*(\d{2,6})\s*(?:tl|₺|try)(?![a-z0-9])", re.I)
+
+
+def pick_card(cards: Sequence[Dict[str, Any]], amount: int) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """
+    在商品卡片里按面额挑选。
+    :return: (卡片, 是否为自定义金额商品)。固定面额优先；没有时用金额范围覆盖它的「自定义金额」商品。
+    """
+    pattern = amount_pattern(amount)
+    for card in cards:
+        title = fold(card.get("title"))
+        if RANGE_RE.search(title):
+            continue
+        if pattern.search(title):
+            return card, False
+    for card in cards:
+        matched = RANGE_RE.search(fold(card.get("title")))
+        if matched and card.get("inputs") and int(matched.group(1)) <= amount <= int(matched.group(2)):
+            return card, True
+    return None, False
+
+
 def mask_code(code: str) -> str:
     if len(code) <= 8:
         return code[:2] + "*" * max(0, len(code) - 2)
@@ -233,6 +255,8 @@ const visible = el => {
     const st = getComputedStyle(el);
     return !(st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity || '1') === 0);
 };
+// 按钮文字前后常带图标字符（🛒、ℹ、图标字体私有区字符），匹配前去掉
+const label = s => fold(s).replace(/^[^a-z0-9₺*•·]+/, '').replace(/[^a-z0-9₺)*•·]+$/, '');
 const mark = el => {
     let id = el.getAttribute('data-mpx');
     if (!id) { id = 'm' + Math.random().toString(36).slice(2, 10); el.setAttribute('data-mpx', id); }
@@ -262,7 +286,7 @@ JS_FIND_CLICKABLE = "([patterns, opts]) => {" + _JS_FOLD + r"""
                 raw = (lab ? lab.innerText : '') + ' ' + (el.value || '');
             }
             raw = raw || el.getAttribute('aria-label') || el.getAttribute('title') || '';
-            const text = fold(raw);
+            const text = label(raw);
             if (!text || text.length > maxLen) continue;
             if (excludes.some(r => r.test(text))) continue;
             if (opts.skipMarked && el.getAttribute('data-mpx-skip')) continue;
@@ -393,7 +417,7 @@ JS_VERIFY_STATE = "([otpSel]) => {" + _JS_FOLD + r"""
     const verifyText = /(3d ?secure|3-d secure|\b3ds\b|dogrulama|tek kullanimlik|one[- ]?time|\botp\b|verification|\bsms\b|authenticat|authoris|authoriz|approve|digital token|digibank|secure ?code|id check|visa secure|safekey|guvenlik kodu|onay kodu|sifre)/.test(text);
     const appText = /(approve|authoris|authoriz|push notification|digital token|digibank|banking app|mobile app|in-app|uygulama(niz|si)? (uzerinden|ile|dan)|mobil uygulama|check your (phone|device|app)|open your)/.test(text);
     const errorText = /(hatali|yanlis|incorrect|invalid|wrong|gecersiz|tekrar deneyin|try again|did not match|eslesmedi)/.test(text);
-    const cardRe = /(card|kart|cc-|cvv|cvc|cvc2|expir|son kullanma|month|year|holder|sahibi|\bpan\b|kupon|coupon|indirim|promo|referans|reference|search|arama|e-?posta|email|telefon numarasi|phone number|posta ?kodu|postal|zip|adet|quantity|qty)/;
+    const cardRe = /(card|kart|cc[-_]|owner|holder|isim|ad ?soyad|cvv|cvc|cvc2|expir|son kullanma|month|year|holder|sahibi|\bpan\b|kupon|coupon|indirim|promo|referans|reference|search|arama|e-?posta|email|telefon numarasi|phone number|posta ?kodu|postal|zip|adet|quantity|qty)/;
     const otpRe = /(otp|sms|code|kod|sifre|password|passcode|\bpin\b|token|verif|dogrula|onay)/;
     let otp = null, inputs = 0;
     const consider = [];
@@ -469,6 +493,40 @@ JS_BINANCE_STATE = "([ignoreIds]) => {" + _JS_FOLD + r"""
 }
 """
 
+JS_PRODUCT_CARDS = "() => {" + _JS_FOLD + r"""
+    const addRe = /^(sepete ekle|add to (cart|basket)|sepete at)\b/;
+    const clickable = 'a,button,input[type=submit],input[type=button],[role=button]';
+    const isAdd = el => addRe.test(label(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || ''));
+    const cards = [];
+    for (const btn of document.querySelectorAll(clickable)) {
+        if (!visible(btn) || !isAdd(btn)) continue;
+        // 往上找：只包含这一个「加入购物车」按钮、且带金额文字的最大容器 = 商品卡片
+        let node = btn.parentElement, card = null;
+        for (let depth = 0; node && node !== document.body && depth < 10; depth++, node = node.parentElement) {
+            const adds = Array.from(node.querySelectorAll(clickable)).filter(el => visible(el) && isAdd(el));
+            if (adds.length > 1) break;
+            if (/\d\s*(tl|₺|try)\b/.test(fold(node.innerText || ''))) card = node;
+        }
+        if (!card) continue;
+        const raw = card.innerText || '';
+        const heading = card.querySelector('h1,h2,h3,h4,h5,h6,[class*=title i],[class*=name i],[class*=baslik i]');
+        let title = heading && visible(heading) ? heading.innerText : '';
+        if (!title || !/\d/.test(title)) title = raw.split('\n').map(t => t.trim()).find(t => t && /\d/.test(t)) || raw.split('\n')[0] || '';
+        let detail = '';
+        for (const a of card.querySelectorAll('a[href]')) {
+            if (/(detay|detail|incele)/.test(label(a.innerText || ''))) { detail = a.href; break; }
+        }
+        const inputs = Array.from(card.querySelectorAll('input')).filter(el => visible(el) && !el.disabled
+            && !/^(hidden|submit|button|checkbox|radio)$/i.test(el.type || ''))
+            .map(el => ({id: mark(el), placeholder: el.getAttribute('placeholder') || '', name: el.name || '', type: el.type || ''}));
+        const disabled = !!btn.disabled || btn.getAttribute('aria-disabled') === 'true' || /\bdisabled\b/.test(btn.className || '');
+        cards.push({add: mark(btn), title: title.replace(/\s+/g, ' ').trim().slice(0, 160),
+                    text: raw.replace(/\s+/g, ' ').trim().slice(0, 400), detail, inputs, disabled});
+    }
+    return cards;
+}
+"""
+
 JS_CAPTCHA = r"""
 () => !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="challenges.cloudflare.com"], .g-recaptcha, .h-captcha, .cf-turnstile')
 """
@@ -527,6 +585,7 @@ class PurchaseRequest:
     verify_timeout: int = 300
     known_codes: Sequence[str] = ()
     pay_timeout: int = 900
+    pick_amount: Optional[int] = None
 
 
 @dataclass
@@ -659,6 +718,8 @@ class OyunforShop:
         # 填过卡信息的 frame 与输入框（截图时遮挡）
         self.card_frame: Any = None
         self.card_masks: List[Any] = []
+        # 在列表页选中的商品卡片
+        self.chosen_card: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------ 基础
     def note(self, text: str):
@@ -973,15 +1034,43 @@ class OyunforShop:
                 return values[0]
         return None
 
-    def resolve_product(self, amount: Optional[int], product_url: str = "") -> Product:
-        """打开目标商品页"""
-        if product_url:
-            self.goto(product_url, "商品页")
-        else:
+    def product_cards(self) -> List[Dict[str, Any]]:
+        try:
+            cards = self.page.evaluate(JS_PRODUCT_CARDS) or []
+        except Exception as err:  # noqa
+            self.note(f"识别商品卡片失败：{str(err)[:120]}")
+            return []
+        return [card for card in cards if isinstance(card, dict)]
+
+    def resolve_product(self, amount: Optional[int], product_url: str = "",
+                        pick_amount: Optional[int] = None) -> Product:
+        """
+        打开商品所在页面并确定要买哪一个。
+        链接可以是分类页（整页列表，按面额挑卡片），也可以是单个商品页；不填链接时打开 App Store 分类页。
+        :param amount: 要买的面额（商品页上的面额必须与它一致）
+        :param pick_amount: 只用来在列表页里挑商品的面额（命令只给了链接时，用设置里的面额）
+        """
+        want = amount or pick_amount
+        self.chosen_card = None
+        url = product_url or self.overrides.get("category_url") or CATEGORY_PATH
+        self.goto(url, "商品页" if product_url else "礼品卡分类页")
+        cards = self.product_cards()
+        self.snap("listing" if len(cards) >= 2 else "product-page")
+        if cards:
+            self.note(f"页面上有 {len(cards)} 个商品：" + "；".join(card.get("title", "")[:40] for card in cards[:8]))
+        if want:
+            card, custom = pick_card(cards, want)
+            if card:
+                return self._use_card(card, want, custom)
+        if len(cards) >= 2:
+            if not want:
+                raise FlowError("failed", "这是商品列表页，请同时填写面额，插件才知道买哪一个")
+            raise FlowError("failed", f"页面里没有 {want} TL 的商品，也没有能填这个金额的自定义金额商品")
+        if not product_url:
             if not amount:
                 raise FlowError("failed", "没有指定面额或商品链接")
-            url = self._find_product_link(amount)
-            self.goto(url, "商品页")
+            # 分类页结构没认出来：退回按链接找商品页
+            self.goto(self._find_product_link(amount), "商品页")
         product = self.inspect_product()
         if amount and product.face_value and product.face_value != amount:
             self.snap("product-mismatch")
@@ -1016,6 +1105,54 @@ class OyunforShop:
         guess = f"{CATEGORY_PATH}/{PRODUCT_SLUG.format(amount=amount)}"
         self.note(f"分类页没有找到 {amount} TL 商品，按地址规律直接打开：{guess}")
         return guess
+
+    def _use_card(self, card: Dict[str, Any], amount: int, custom: bool) -> Product:
+        title = card.get("title") or ""
+        rest = (card.get("text") or "").replace(title, " ", 1)
+        prices = find_money(rest)
+        product = Product(url=self.page.url, title=title, face_value=amount,
+                          price=float(amount) if custom and not prices else (prices[0] if prices else None))
+        text = fold(card.get("text"))
+        product.in_stock = not (card.get("disabled") or any(re.search(p, text) for p in OUT_OF_STOCK_TEXT))
+        self.chosen_card = {"title": title, "custom": custom, "listing_url": self.page.url, "amount": amount}
+        self.note(f"选中商品：{title}" + ("（自定义金额，填 " + str(amount) + " TL）" if custom else "")
+                  + f"；价格：{product.price if product.price is not None else '未识别'}；"
+                  + f"库存：{'有' if product.in_stock else '无'}")
+        return product
+
+    def _refind_card(self) -> Optional[Dict[str, Any]]:
+        chosen = self.chosen_card or {}
+        cards = self.product_cards()
+        for card in cards:
+            if card.get("title") == chosen.get("title"):
+                return card
+        card, _ = pick_card(cards, chosen.get("amount") or 0)
+        return card
+
+    def _add_from_listing(self, quantity: int):
+        """在列表页点选中卡片自己的「Sepete Ekle」，数量 > 1 时点多次"""
+        chosen = self.chosen_card
+        listing = chosen["listing_url"].split("#")[0]
+        for index in range(max(1, quantity)):
+            if index and self.page.url.split("#")[0] != listing:
+                self.goto(listing, "商品列表")
+            card = self._refind_card()
+            if not card:
+                self.snap("card-missing")
+                raise FlowError("failed", f"找不到「{chosen['title']}」这张商品卡片了")
+            if chosen["custom"]:
+                inputs = card.get("inputs") or []
+                if not inputs:
+                    raise FlowError("failed", "自定义金额商品没有金额输入框")
+                self._fill(inputs[0], str(chosen["amount"]), "金额", digits=True)
+                if len(inputs) > 1:
+                    self._fill(inputs[1], "00", "金额小数", digits=True)
+            if not self.click({"id": card["add"], "text": "sepete ekle"}, what=f"加入购物车（{card['title'][:40]}）"):
+                raise FlowError("failed", "点击「Sepete Ekle」失败")
+            self.settle(6)
+            self.pause(0.8, 1.5)
+        if quantity > 1:
+            self.note(f"已加入购物车 {quantity} 次")
 
     def inspect_product(self) -> Product:
         price_sel = ",".join(self.override_selectors("price")) or None
@@ -1129,15 +1266,18 @@ class OyunforShop:
 
     def start_checkout(self, quantity: int) -> None:
         """商品页 → （购物车）→ 结算页"""
-        if quantity > 1 and not self.set_quantity(quantity):
-            raise FlowError("failed", "商品页没有找到数量输入框，无法一次购买多张（可改为分多次购买）")
-        if self.find_and_click("buy_now", "立即购买", maxLen=40):
-            pass
-        elif self.find_and_click("add_to_cart", "加入购物车", maxLen=40):
-            pass
+        if getattr(self, "chosen_card", None):
+            self._add_from_listing(quantity)
         else:
-            self.snap("product-no-button")
-            raise FlowError("failed", "商品页没有找到「Hemen Al / Sepete Ekle」按钮（可能缺货、未登录或页面结构不同）")
+            if quantity > 1 and not self.set_quantity(quantity):
+                raise FlowError("failed", "商品页没有找到数量输入框，无法一次购买多张（可改为分多次购买）")
+            if self.find_and_click("buy_now", "立即购买", maxLen=40):
+                pass
+            elif self.find_and_click("add_to_cart", "加入购物车", maxLen=40):
+                pass
+            else:
+                self.snap("product-no-button")
+                raise FlowError("failed", "商品页没有找到「Hemen Al / Sepete Ekle」按钮（可能缺货、未登录或页面结构不同）")
         self.settle()
         self.pause(1.0, 2.0)
         if not self._looks_like_checkout() and not self._looks_like_cart():
@@ -1400,6 +1540,9 @@ class OyunforShop:
                 continue
             if ignore and state.get("otp") and ignore.get(frame.url) == state["otp"].get("id"):
                 state["otp"] = None
+            if self.card_form_in(frame):
+                # 有卡号输入框的是支付页本身（可能显示了错误），不是银行验证页
+                continue
             off_site = not self.on_site(frame.url or "")
             if frame is self.card_frame and not state.get("otp"):
                 # 银行卡表单所在的网关页本身会提到 3D Secure，不算验证页
@@ -1416,6 +1559,21 @@ class OyunforShop:
 
     def card_form_in(self, frame: Any) -> bool:
         return bool(self._find_input("number", frame))
+
+    def _gateway_error(self) -> str:
+        """填卡的支付页上显示的错误（卡号错误、被拒等）；卡表单不在了就返回空"""
+        frame = self.card_frame
+        if frame is None:
+            return ""
+        try:
+            if frame.is_detached() or not self.card_form_in(frame):
+                return ""
+            text = fold(self.page_text(frame).get("text"))
+        except Exception:  # noqa
+            return ""
+        matched = re.search(r"[^.!\n]{0,40}(hatali|gecersiz|reddedildi|basarisiz|declined|invalid|incorrect|failed)"
+                            r"[^.!\n]{0,40}", text)
+        return matched.group(0).strip() if matched else ""
 
     def _outcome_hits(self, frame: Any) -> Tuple[List[Tuple[str, str]], str, List[str]]:
         """返回 frame 里命中的成功/失败文字、地址、兑换码"""
@@ -1480,6 +1638,8 @@ class OyunforShop:
         """
         start_url = self.page.url
         baseline = self.outcome_baseline()
+        gateway_error_before = self._gateway_error()
+        clicked_at = time.time()
         if not self.click(button, frame=frame, what=f"付款（{button.get('text')}）"):
             raise FlowError("failed", "点击付款按钮失败")
         verification = ""
@@ -1512,6 +1672,11 @@ class OyunforShop:
             if outcome:
                 self.snap(f"result-{outcome}")
                 return outcome, detail, verification
+            if verify_started is None and time.time() - clicked_at > 4:
+                error = self._gateway_error()
+                if error and error != gateway_error_before:
+                    self.snap("gateway-error")
+                    return OUT_FAILED, f"支付页提示：{error}", verification
 
             verify = self._verify_frame_state(ignore=baseline.get("otp"))
             if verify:
@@ -1915,7 +2080,7 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
         if clear_cart:
             shop.clear_cart()
 
-        product = shop.resolve_product(request.amount, request.product_url)
+        product = shop.resolve_product(request.amount, request.product_url, request.pick_amount)
         result.product = product
         shop.snap("product")
         if product.in_stock is False:
@@ -1940,6 +2105,8 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
                 raise FlowError("limit", f"应付 {total:.2f} TL 超过单笔上限 {request.max_total:.2f} TL")
             if product.price is not None and total > product.price * quantity * 1.15 + 5:
                 raise FlowError("failed", f"应付 {total:.2f} TL 明显高于商品价格 × 数量，购物车里可能有其他商品，已停止")
+            if product.price is not None and total < product.price * quantity * 0.9 - 1:
+                raise FlowError("failed", f"应付 {total:.2f} TL 明显低于商品价格 × 数量，购物车里的数量可能不对，已停止")
         else:
             shop.note("没有识别出结算页的应付金额")
             if request.max_total and product.price is None:

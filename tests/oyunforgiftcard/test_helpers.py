@@ -3,7 +3,8 @@
 """
 from app.plugins.oyunforgiftcard.browser import playwright_proxy
 from app.plugins.oyunforgiftcard.shop import (amount_pattern, extract_codes, find_money, fold, load_overrides,
-                                               mask_code, parse_cookie, parse_expiry, parse_number, sanitize_html)
+                                               mask_code, parse_cookie, parse_expiry, parse_number, pick_card,
+                                               sanitize_html)
 
 
 def test_fold_turkish():
@@ -82,3 +83,28 @@ def test_playwright_proxy():
                                                            "password": "p"}
     assert playwright_proxy("1.2.3.4:3128") == {"server": "http://1.2.3.4:3128"}
     assert playwright_proxy("") is None
+
+
+def test_pick_card_from_real_listing_titles():
+    cards = [
+        {"title": "100 - 2000 TL App Store Card", "inputs": [{"id": "a"}, {"id": "b"}]},
+        {"title": "2500 TL App Store Card", "inputs": []},
+        {"title": "100 TL App Store Card", "inputs": []},
+        {"title": "250 TL App Store Card", "inputs": []},
+        {"title": "500 TL App Store Card", "inputs": []},
+    ]
+    assert pick_card(cards, 100) == (cards[2], False)
+    assert pick_card(cards, 250) == (cards[3], False)
+    assert pick_card(cards, 2500) == (cards[1], False)
+    assert pick_card(cards, 150) == (cards[0], True)
+    assert pick_card(cards, 2000) == (cards[0], True)
+    assert pick_card(cards, 5000) == (None, False)
+    assert pick_card(cards[1:], 150) == (None, False)
+    # 自定义金额卡没有输入框时不能用
+    assert pick_card([{"title": "100 - 2000 TL App Store Card", "inputs": []}], 150) == (None, False)
+
+
+def test_money_with_dot_decimals_like_real_site():
+    assert find_money("100.00 TL") == [100.0]
+    assert find_money("2000.00 TL") == [2000.0]
+    assert find_money("1,000.00 TL") == [1000.0]
