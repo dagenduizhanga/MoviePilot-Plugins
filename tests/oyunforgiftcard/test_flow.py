@@ -586,20 +586,62 @@ def test_balance_option_named_oyunfor_bakiyesi(oyun, site):
 
 
 def test_real_like_cart_page_with_alisverisi_tamamla(oyun, site):
-    """真实购物车：页头有「Yemeksepeti」活动链接（地址里含 sepet，不能当成购物车），购物车只有图标；
-    「Sipariş Özeti」里的「Alışverişi Tamamla」是提交按钮，用户确认它是去付款页 —— 演练也要点它"""
+    """页头有「Yemeksepeti」活动链接（地址里含 sepet，不能当成购物车），购物车只有图标；
+    「Alışverişi Tamamla」在 Oyunfor 上会直接用余额下单 —— 演练绝不能点，实买才点"""
     site.set(header_cart="icon", cart_button="tamamla_submit", cart="100")
     oyun.init_plugin(make_config(dry_run=True, amount="100"))
     record = run(oyun)
     assert record["code"] == "dry_run", record
-    assert "付款前一步" in record["message"] and record["total"] == 105.0, record
-    assert len(site.posts("/sepet/onay")) == 1 and not site.posts("/odeme")
+    assert "演练停在购物车" in record["message"] and "Alışverişi Tamamla" in record["message"], record
+    assert not site.posts("/sepet/onay") and not site.posts("/odeme")
     # 访问过的页面里不能有活动页
     assert not [item for item in site.state()["log"] if item["path"] == "/mocanetwork/yemeksepeti"]
     oyun.init_plugin(make_config(amount="100"))
     record = run(oyun)
     assert record["code"] == "success", record
 
+
+
+def test_oyunfor_cart_enough_balance_order_button_not_clicked_in_dry_run(oyun, site):
+    """真实购物车、余额够：按钮是「Alışverişi Tamamla」(.siparisTamamla)，点了直接用余额下单。
+    演练停在它前面；实买时它就是付款按钮"""
+    site.set(cart_button="oyunfor", cart_path="/sepetim", header_cart="icon")
+    oyun.init_plugin(make_config(dry_run=True))
+    record = run(oyun)
+    assert record["code"] == "dry_run", record
+    assert "付款前一步" in record["message"] and "Alışverişi Tamamla" in record["message"], record
+    assert record["total"] == 262.5
+    assert not site.posts("/orders/siparisTamamla") and site.state()["balance"] == 1500.0
+    oyun.init_plugin(make_config())
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert len(site.posts("/orders/siparisTamamla")) == 1
+    assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
+
+
+def test_oyunfor_cart_enough_balance_but_card_mode_stops(oyun, site):
+    """余额够时网站只给「Alışverişi Tamamla」（用余额下单），选了银行卡就停下并说明原因"""
+    site.set(cart_button="oyunfor", cart_path="/sepetim", header_cart="icon")
+    _card(oyun, dry_run=True)
+    record = run(oyun)
+    assert record["code"] == "failed", record
+    assert "余额已经够付" in record["message"]
+    assert not site.posts("/orders/siparisTamamla") and not site.posts("/payment/paymentSender")
+
+
+def test_oyunfor_cart_short_balance_goes_to_topup_page(oyun, site):
+    """真实购物车、余额不够：按钮是「Ödeme Yap」，只跳到 /profil/odemeyap/<差额> 补差额页（不下单）；
+    选「Kredi Kartı」→ 付款渠道 →「Ödeme Yap」在新标签页打开 PayTR，演练停在卡表单前"""
+    site.set(cart_button="oyunfor", cart_path="/sepetim", header_cart="icon", balance="0")
+    _card(oyun, dry_run=True)
+    record = run(oyun)
+    assert record["code"] == "dry_run", record
+    assert "银行卡页面" in record["message"], record
+    assert record["total"] == 262.5
+    assert any(item["path"] == "/profil/odemeyap/262/50" for item in site.state()["log"])
+    assert len(site.posts("/payment/paymentSender")) == 1
+    assert site.posts("/payment/paymentSender")[0]["data"]["method"] == "kart"
+    assert not site.posts("/paytr/pay") and not site.posts("/orders/siparisTamamla")
 
 
 def test_real_cart_row_close_icon_clears_leftovers(oyun, site):

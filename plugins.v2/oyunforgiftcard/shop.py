@@ -21,8 +21,10 @@ BASE_URL = "https://www.oyunfor.com"
 CATEGORY_PATH = "/apple-store/apple-store-itunes-gift-card"
 PRODUCT_SLUG = "{amount}-tl-tutarinda-app-store-itunes-hediye-karti"
 # 订单页候选地址（找不到「Siparişlerim」链接时依次尝试）
-ORDERS_PATHS = ("/hesabim/siparislerim", "/siparislerim", "/hesabim/siparis-gecmisi", "/hesabim/siparisler",
-                "/uye/siparislerim", "/hesabim")
+ORDERS_PATHS = ("/profil/aldiklarim", "/hesabim/siparislerim", "/siparislerim", "/hesabim/siparis-gecmisi",
+                "/hesabim/siparisler", "/uye/siparislerim", "/hesabim")
+# 订单列表页（会同时列出历史订单的兑换码）；Oyunfor 用余额下单后直接跳到 /profil/aldiklarim?islem=ok
+ORDERS_LIST_RE = re.compile(r"(^|/)(aldiklarim|siparislerim|siparis-gecmisi|siparisler|orders)/?$", re.I)
 LOGIN_PATHS = ("/giris", "/giris-yap", "/uye-girisi", "/login", "/hesabim/giris")
 
 # App Store / iTunes 兑换码：16 位，以 X 开头；也兼容 4-4-4-4 分组写法
@@ -37,7 +39,7 @@ TEXT_PATTERNS: Dict[str, List[str]] = {
     "go_cart": [r"^sepete git\b", r"^sepeti (goruntule|onayla)\b", r"^sepetim\b", r"^sepet\b", r"^(go to |view )?cart\b"],
     "checkout": [r"^odemeye gec\b", r"^odeme adimina gec\b", r"^odeme sayfasina (git|gec)\b", r"^sepeti onayla\b",
                  r"^kasaya git\b", r"^alisverisi tamamla\b", r"^siparisi tamamla\b",
-                 r"^satin al\b", r"^devam et\b", r"^devam\b", r"^checkout\b", r"^proceed\b"],
+                 r"^satin al\b", r"^devam et\b", r"^devam\b", r"^checkout\b", r"^proceed\b", r"^odeme yap\b"],
     "pay_balance": [r"bakiye ile (ode|odeme|satin al)", r"^(hesap )?bakiye(m|si|niz)?\b", r"bakiyemden",
                     r"\bbakiye(m|si|niz|den)?\b", r"oyunfor ?(pay|bakiye|cuzdan)", r"\bcuzdan(im|dan)?\b",
                     r"\bbalance\b", r"\bwallet\b"],
@@ -69,6 +71,7 @@ PAYMENT_EXCLUDE = [r"yukle", r"top ?up", r"\bload\b", r"kaydet", r"\bsave\b", r"
 # 付款方式选项可能出现的元素（不含普通 <a>，避免点到页头链接）
 OPTION_SELECTOR = ("label,input[type=radio],[role=radio],[role=tab],li[data-value],[data-payment],[data-method],"
                    "[data-type],button,div[class*=payment i],div[class*=odeme i],div[class*=method i],"
+                   "div[class*=bankaGetir i],"
                    "li[class*=payment i],li[class*=odeme i],a[class*=payment i],a[class*=odeme i],a[class*=tab i]")
 BUTTON_SELECTOR = "button,input[type=submit],input[type=button],a,[role=button]"
 DIALOG_SCOPE = ("[role=dialog],[role=alertdialog],.modal.show,.modal.in,.swal2-popup,.sweet-alert,.jconfirm-box,"
@@ -76,9 +79,20 @@ DIALOG_SCOPE = ("[role=dialog],[role=alertdialog],.modal.show,.modal.in,.swal2-p
                 "[class*=minicart i],[class*=mini-cart i],[class*=side-cart i],[class*=sepet-popup i],[class*=cart-popup i]")
 # 购物车页「下一步」按钮里这些字样可能直接下单：演练时不点（普通链接则直接打开链接）
 RISKY_NEXT_RE = re.compile(r"(satin al|tamamla|onayla|\bode\b|odeme yap|\bpay\b|place order|confirm|bitir)")
-# 购物车页上这些「下一步」是去付款页（Oyunfor 购物车「Sipariş Özeti」上的「Alışverişi Tamamla」已确认是去付款页）
-SAFE_NEXT_RE = re.compile(r"^(alisverisi tamamla|odemeye gec|odeme adimina gec|odeme sayfasina (git|gec)|sepeti onayla|"
+# 购物车页上这些「下一步」只是去付款页。
+# 注意「Alışverişi Tamamla」不在这里：Oyunfor 上它会直接用余额下单（见下面 OYUNFOR_ORDER_BUTTON），演练绝不能点。
+SAFE_NEXT_RE = re.compile(r"^(odemeye gec|odeme adimina gec|odeme sayfasina (git|gec)|sepeti onayla|"
                           r"kasaya git|devam et)\b")
+# Oyunfor 购物车「Sipariş Özeti」里只有一个按钮，网站按「余额够不够付」切换它（站点 custom.js 与购物车页脚本）：
+#  - 余额够：「Alışverişi Tamamla」(.siparisTamamla) → POST orders/siparisTamamla，直接用余额下单（点了就买了）
+#  - 余额不够：「Ödeme Yap」(.alisVerisiTamamlaOdemeYap) → 只跳到 /profil/odemeyap/<差额 TL>/<差额 kuruş>，不下单
+OYUNFOR_ORDER_BUTTON = ".alisverisTamamlaRealDiv button.siparisTamamla, button.siparisTamamla"
+OYUNFOR_TOPUP_BUTTON = ".alisverisTamamlaRealDiv button.alisVerisiTamamlaOdemeYap, button.alisVerisiTamamlaOdemeYap"
+# 补差额付款页：付款方式是 div.bankaGetir 方块（Kredi Kartı / BinancePay / ATM-HAVALE-EFT），
+# 点了以后加载付款渠道 div.listItem（如 PayTR）和「Ödeme Yap」按钮 button.paymentSender（点它才去网关）
+TOPUP_PATH_RE = re.compile(r"/profil/odemeyap/(\d+)/(\d+)", re.I)
+OYUNFOR_PROVIDER = ".listItem"
+OYUNFOR_SEND_BUTTON = "button.paymentSender"
 # 购物车地址：按路径段精确匹配（避免把 /mocanetwork/yemeksepeti 这类当成购物车）
 CART_PATH_RE = re.compile(r"(^|/)(sepet|sepetim|sepetiniz|alisveris-sepeti|cart|basket|shopping-cart)(/|$|\.)", re.I)
 CART_PATHS = ("/sepet", "/sepetim", "/sepet.html", "/alisveris-sepeti", "/cart")
@@ -102,7 +116,9 @@ BINANCE_PAID_TEXT = [r"payment (successful|completed|success)", r"paid successfu
 BINANCE_EXPIRED_TEXT = [r"\bexpired\b", r"order (has been )?(closed|cancell?ed)", r"suresi doldu", r"已过期",
                         r"订单已关闭", r"payment failed"]
 PAY_MODE_TEXT = {"balance": "余额支付", "card": "银行卡支付", "binance": "币安支付（Binance Pay）"}
-SUCCESS_URL = r"(basarili|success|tamamlandi|tesekkur|siparis-?(onay|tamam|basari)|order-?(complete|success|confirm)|odeme-?basari)"
+# Oyunfor 用余额下单成功后跳到 /profil/aldiklarim?islem=ok
+SUCCESS_URL = (r"(basarili|success|tamamlandi|tesekkur|siparis-?(onay|tamam|basari)|order-?(complete|success|confirm)|"
+               r"odeme-?basari|aldiklarim\?islem=ok)")
 FAIL_URL = r"(basarisiz|odeme-?hata|payment-?(fail|error)|/fail)"
 OUT_OF_STOCK_TEXT = [r"stokta yok", r"\btukendi\b", r"stok(ta)? kalmadi", r"out of stock", r"sold out",
                      r"gecici olarak temin edilemiyor", r"stok bekleniyor"]
@@ -898,6 +914,9 @@ class OyunforShop:
         self.card_masks: List[Any] = []
         # 在列表页选中的商品卡片
         self.chosen_card: Optional[Dict[str, Any]] = None
+        # Oyunfor 购物车：余额够时的「Alışverişi Tamamla」（点了就用余额下单）；进补差额页前读到的购物车总额
+        self.balance_order_button: Optional[Dict[str, Any]] = None
+        self.cart_total: Optional[float] = None
 
     # ------------------------------------------------------------ 基础
     def note(self, text: str):
@@ -1598,6 +1617,8 @@ class OyunforShop:
                 self.open_cart()
             self.pause()
         # 购物车页：继续到结算
+        self.balance_order_button = None
+        self.cart_total = None
         for _ in range(3):
             if self._looks_like_checkout():
                 break
@@ -1605,6 +1626,31 @@ class OyunforShop:
                 break
             self.align_cart_quantity(quantity)
             self.snap("cart")
+            # Oyunfor 真实购物车：按按钮的 class 判断，比按文字可靠
+            order_button = self._visible_marked(OYUNFOR_ORDER_BUTTON)
+            if order_button:
+                # 余额够：这个按钮一点就用余额下单。不当成「去结算」点，交给付款步骤（演练会停在它前面）
+                self.cart_total = self.read_total()
+                self.balance_order_button = order_button
+                self.note(f"购物车按钮是「{order_button.get('text')}」：余额够付，点它会直接用余额下单")
+                return
+            topup_button = self._visible_marked(OYUNFOR_TOPUP_BUTTON)
+            if topup_button:
+                # 余额不够：「Ödeme Yap」只是跳到补差额付款页，不会下单，演练也可以点
+                self.cart_total = self.read_total()
+                self.note(f"购物车按钮是「{topup_button.get('text')}」：余额不够，先去付款页补差额（这一步不下单）")
+                if not self.click(topup_button, what=f"去付款页（{topup_button.get('text')}）"):
+                    raise FlowError("failed", f"点击「{topup_button.get('text')}」失败。" + self.page_summary())
+                try:
+                    self.page.wait_for_url(TOPUP_PATH_RE, timeout=15000)
+                except Exception:  # noqa
+                    pass
+                self.settle()
+                self.pause()
+                match = TOPUP_PATH_RE.search(self.page.url or "")
+                if match:
+                    self.note(f"进入补差额付款页，需要付 {int(match.group(1))}.{match.group(2)[:2].ljust(2, '0')} TL")
+                continue
             found = self.find("checkout", maxLen=40, exclude=[r"alisverise devam", r"continue shopping"])
             if not found:
                 break
@@ -1613,6 +1659,39 @@ class OyunforShop:
         self.snap("checkout")
         if not self._looks_like_checkout():
             raise FlowError("failed", "没有进入结算页（没有找到付款方式）。" + self.page_summary())
+
+    def _visible_marked(self, selector: str) -> Optional[Dict[str, Any]]:
+        """按 CSS 选择器找第一个可见元素，打上 data-mpx 标记（给 click 用）"""
+        try:
+            locator = self.page.locator(selector)
+            for index in range(min(locator.count(), 6)):
+                item = locator.nth(index)
+                if not item.is_visible():
+                    continue
+                return item.evaluate(r"""el => {
+                    if (!el.getAttribute('data-mpx')) el.setAttribute('data-mpx', 'o' + Math.random().toString(36).slice(2, 10));
+                    return {id: el.getAttribute('data-mpx'), text: (el.innerText || el.value || '').replace(/\s+/g, ' ').trim(),
+                            tag: el.tagName.toLowerCase(), disabled: !!el.disabled, href: el.getAttribute('href') || ''};
+                }""")
+        except Exception:  # noqa
+            return None
+        return None
+
+    def _topup_send_button(self) -> Optional[Dict[str, Any]]:
+        """补差额付款页：选了付款方式后选付款渠道（一般只有一个，如 PayTR），返回「Ödeme Yap」按钮"""
+        picked = False
+        for _ in range(12):
+            provider = None if picked else self._visible_marked(OYUNFOR_PROVIDER)
+            if provider:
+                self.click(provider, what="付款渠道")
+                picked = True
+                self.settle(5)
+                self.pause(0.5, 0.9)
+            button = self._visible_marked(OYUNFOR_SEND_BUTTON)
+            if button:
+                return button
+            self.pause(0.5, 0.9)
+        return None
 
     def _looks_like_cart(self) -> bool:
         if not self._page_ok():
@@ -1634,6 +1713,18 @@ class OyunforShop:
         """
         key = {"balance": "pay_balance", "card": "pay_card", "binance": "pay_binance"}.get(mode, "pay_balance")
         what = PAY_MODE_TEXT.get(mode, mode)
+        order_button = self.balance_order_button
+        if order_button:
+            # Oyunfor 余额够付：购物车上的「Alışverişi Tamamla」就是付款按钮，网站不会再给其他付款方式
+            if mode != "balance":
+                raise FlowError("failed", f"账户余额已经够付这一单，Oyunfor 购物车只给「{order_button.get('text')}」"
+                                          f"（直接用余额下单），不会出现{what}。要用{what}，请把付款方式改成余额支付，"
+                                          "或者先把余额用掉")
+            return f"余额（{order_button.get('text')}）", order_button
+        topup = bool(TOPUP_PATH_RE.search(self.page.url or ""))
+        if topup and mode == "balance":
+            raise FlowError("insufficient", "余额不够：Oyunfor 购物车显示「Ödeme Yap」，需要先补差额。"
+                                            "请先充值余额，或把付款方式改成银行卡 / 币安支付")
         found = self.find(key, maxLen=80, selector=OPTION_SELECTOR, exclude=PAYMENT_EXCLUDE)
         if not found:
             self.snap("payment-options")
@@ -1646,6 +1737,13 @@ class OyunforShop:
         self.click(found, what=f"{what}（{text}）")
         self.pause(0.8, 1.6)
         self.settle(5)
+        if topup:
+            # 补差额页：选付款渠道，拿到「Ödeme Yap」（点它才会去 PayTR / 币安，这里不点）
+            button = self._topup_send_button()
+            if not button:
+                self.snap("payment-options")
+                raise FlowError("failed", f"选了「{text}」以后没有出现「Ödeme Yap」按钮。" + self.page_summary())
+            return text, button
         return text, None
 
     def tick_agreements(self) -> int:
@@ -2351,27 +2449,31 @@ class OyunforShop:
         def fresh(items: List[str]) -> List[str]:
             return [c for c in items if c not in known_set]
 
-        codes = fresh(self.scan_codes())
-        if not codes and self.reveal_codes():
-            codes = fresh(self.scan_codes())
-            self.snap("codes-revealed")
-        if codes:
-            return codes, self.page.url
-        # 去订单页：打开最新一笔订单
-        self.note("结果页没有兑换码，去订单页查找")
-        orders_url = self.overrides.get("orders_url")
-        opened = False
-        if orders_url:
-            self.goto(orders_url, "订单页")
-            opened = True
-        elif self.find_and_click("orders_link", "我的订单", maxLen=30):
-            self.settle()
-            opened = True
+        opened = bool(ORDERS_LIST_RE.search(urlparse(self.page.url).path))
+        if opened:
+            # 付款后直接到了订单列表页：列表里可能有历史订单的码，不能直接扫，去最新一笔订单的详情里找
+            self.note("付款后到了订单列表页，打开最新一笔订单找兑换码")
         else:
-            self.goto("/", "首页")
-            if self.find_and_click("orders_link", "我的订单", maxLen=30):
+            codes = fresh(self.scan_codes())
+            if not codes and self.reveal_codes():
+                codes = fresh(self.scan_codes())
+                self.snap("codes-revealed")
+            if codes:
+                return codes, self.page.url
+            # 去订单页：打开最新一笔订单
+            self.note("结果页没有兑换码，去订单页查找")
+            orders_url = self.overrides.get("orders_url")
+            if orders_url:
+                self.goto(orders_url, "订单页")
+                opened = True
+            elif self.find_and_click("orders_link", "我的订单", maxLen=30):
                 self.settle()
                 opened = True
+            else:
+                self.goto("/", "首页")
+                if self.find_and_click("orders_link", "我的订单", maxLen=30):
+                    self.settle()
+                    opened = True
         if not opened or not self._page_ok():
             for path in ORDERS_PATHS:
                 self.goto(path, "订单页")
@@ -2447,7 +2549,8 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
         shop.note(f"付款方式：{option}")
         shop.tick_agreements()
 
-        total = shop.read_total()
+        # 进了 Oyunfor 补差额页时，页面上的「Ödenecek Tutar」只是差额，校验用购物车总额
+        total = shop.cart_total if shop.cart_total is not None else shop.read_total()
         result.total = total
         if total is not None:
             shop.note(f"结算页应付金额：{total:.2f} TL")
@@ -2476,6 +2579,8 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
                 shop.click(button, frame=frame, what=f"进入支付页（{button.get('text')}）")
                 shop.settle(15)
                 for _ in range(20):
+                    # Oyunfor 补差额页的「Ödeme Yap」在新标签页打开 PayTR，标签页可能稍后才出现
+                    shop.adopt_new_page()
                     if shop.card_form_visible() or shop.saved_card_option(last4)[1]:
                         break
                     if shop._verify_frame_state():

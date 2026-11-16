@@ -241,7 +241,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_html(self.success_page(int(query.get("order", "0"))))
         if path == "/odeme/hata":
             return self.send_html(self.page("Ödeme", "<h1>Ödeme başarısız</h1><p>İşleminiz başarısız oldu.</p>"))
-        if path == "/hesabim/siparislerim":
+        if path.startswith("/profil/odemeyap/"):
+            parts = path.split("/")
+            return self.send_html(self.topup_page(f"{int(parts[-2])}.{parts[-1]}"))
+        if path in ("/hesabim/siparislerim", "/profil/aldiklarim"):
             if not self.session():
                 return self.redirect("/giris")
             return self.send_html(self.orders_page())
@@ -312,6 +315,37 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect(STATE["cart_path"])
         if path == "/sepet/onay":
             return self.redirect("/odeme")
+        if path == "/orders/siparisTamamla":
+            # 真实站点：余额够就直接用余额下单
+            with LOCK:
+                cart, total = list(STATE["cart"]), self.cart_total()
+                ok = bool(cart) and STATE["balance"] + 0.001 >= total
+                if ok:
+                    order_id = STATE["next_order"]
+                    STATE["next_order"] += 1
+                    qty = sum(i["qty"] for i in cart)
+                    STATE["balance"] -= total
+                    STATE["orders"][order_id] = {"id": order_id, "product": cart[0]["product"], "qty": qty,
+                                                 "total": total, "status": "Tamamlandı",
+                                                 "codes": make_codes(order_id, qty), "method": "bakiye"}
+                    STATE["cart"] = []
+            if not ok:
+                return self.send_json({"status": 0, "msg": "Bakiyeniz yetersiz."})
+            return self.send_json({"status": 1, "msg": "Siparişiniz başarıyla oluşturuldu."})
+        if path == "/payment/paymentSender":
+            # 补差额页的「Ödeme Yap」：建一笔待付订单，返回网关地址（真实站点在新标签页打开 PayTR）
+            method = data.get("method")
+            with LOCK:
+                cart, total = list(STATE["cart"]), self.cart_total()
+                if not cart or method not in ("kart", "binance"):
+                    return self.send_json({"status": 0, "msg": "Ödeme yöntemi seçiniz."})
+                order_id = STATE["next_order"]
+                STATE["next_order"] += 1
+                STATE["orders"][order_id] = {"id": order_id, "product": cart[0]["product"],
+                                             "qty": sum(i["qty"] for i in cart), "total": total,
+                                             "status": "Ödeme Bekleniyor", "codes": [], "method": method}
+            target = f"/odeme/kart?order={order_id}" if method == "kart" else f"/odeme/binance?order={order_id}"
+            return self.send_json({"status": 1, "paytrTokens": self.main + target})
         if path == "/sepet/sil":
             idx = int(data.get("index") or 0)
             with LOCK:
@@ -447,19 +481,66 @@ setTimeout(() => {
 <div class="summary"><h3>Sipariş Özeti</h3><div class="cart-total">Tutar: {total:.2f} TL</div></div><a href="/" class="btn">Alışverişe Devam Et</a>
 {self.cart_button()}""")
 
-    @staticmethod
-    def cart_button():
+    def cart_button(self):
         with LOCK:
             kind = STATE["cart_button"]
+            balance, total = STATE["balance"], self.cart_total()
         if kind == "satinal_link":
             return '<a href="/odeme" class="btn btn-primary">SATIN AL</a>'
+        if kind == "oyunfor":
+            # 和真实站点一样：同一个按钮按余额切换。余额够 →「Alışverişi Tamamla」直接用余额下单；
+            # 不够 →「Ödeme Yap」只跳到补差额页 /profil/odemeyap/<TL>/<kuruş>
+            if balance + 0.001 >= total:
+                return """<div class="alisverisTamamlaRealDiv"><button type="button" class="btn checkCart siparisTamamla alisVerisiTamamla"><i class="far fa-credit-card"></i>&nbsp;Alışverişi Tamamla</button></div>
+<script>document.querySelector('.siparisTamamla').addEventListener('click', function () {
+  this.disabled = true;
+  fetch('/orders/siparisTamamla', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'csrf=x'})
+    .then(r => r.json()).then(a => { if (a.status == 1) setTimeout(() => { location.href = '/profil/aldiklarim?islem=ok'; }, 300); else location.reload(); });
+});</script>"""
+            lira, kurus = f"{total - balance:.2f}".split(".")
+            return f"""<div class="alisverisTamamlaRealDiv"><button type="button" class="btn checkCart odmbttn alisVerisiTamamlaOdemeYap"><i class="far fa-credit-card"></i>&nbsp;Ödeme Yap</button></div>
+<script>document.querySelector('.alisVerisiTamamlaOdemeYap').addEventListener('click', function () {{
+  setTimeout(() => {{ location.href = '/profil/odemeyap/{lira}/{kurus}'; }}, 300);
+}});</script>"""
         if kind == "tamamla_submit":
-            # 仿真实站点购物车右侧「Sipariş Özeti」里的按钮
+            # 文字是「Alışverişi Tamamla」、但没有 Oyunfor class 的普通提交按钮（演练不能点）
             return ('<form method="post" action="/sepet/onay"><button type="submit" class="btn btn-success">'
                     '<i class="fa fa-credit-card"></i> Alışverişi Tamamla</button></form>')
         if kind == "satinal_submit":
             return '<form method="post" action="/sepet/onay"><button type="submit" class="btn btn-primary">SATIN AL</button></form>'
         return '<a href="/odeme" class="btn btn-primary">Ödemeye Geç</a>'
+
+    def topup_page(self, amount):
+        """仿真实补差额付款页：付款方式方块 → 付款渠道 → 「Ödeme Yap」（同步请求后在新标签页打开网关）"""
+        tiles = "".join(f"""<div class="col-md-25 bankaGetir col-50" data-id="{bank_id}" data-durum="ilk">
+<div class="banksItem"><div class="bankImg"></div><div class="bankTitle">{title}</div></div></div>"""
+                        for bank_id, title in ((2, "Kredi Kartı"), (27, "BinancePay"), (1, "ATM-HAVALE-EFT")))
+        script = """<script>
+const methods = {'2': 'kart', '27': 'binance', '1': 'havale'};
+let method = '';
+document.querySelectorAll('.bankaGetir').forEach(tile => tile.addEventListener('click', () => {
+  method = methods[tile.dataset.id];
+  document.getElementById('providers').innerHTML =
+    '<div class="listItem listItem2" data-bankid="45"><div class="bankProvider"><img alt="banka logosu" src="/static/apple-card.svg"></div></div>';
+  document.querySelector('.paymentSender').style.display = 'none';
+  document.querySelector('.listItem').addEventListener('click', () => {
+    document.querySelector('.paymentSender').style.display = '';
+  });
+}));
+document.querySelector('.paymentSender').addEventListener('click', () => {
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/payment/paymentSender', false);
+  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+  xhr.send('method=' + method);
+  const a = JSON.parse(xhr.responseText);
+  if (a.paytrTokens) window.open(a.paytrTokens, '_blank');
+});
+</script>"""
+        return self.page("Ödeme Yap", f"""<div class="bakiyeYukle-content"><ul class="tabClass"><li class="tab-active">TÜM ÖDEME SEÇENEKLERİ</li></ul>
+<div class="row">{tiles}</div><div id="providers"></div>
+<div class="payout"><div class="payoutcls">Ödenecek Tutar: {amount} TRY</div>
+<div class="payoutDivBtn"><button type="button" class="btn cartButton paymentSender" style="display:none">Ödeme Yap</button></div></div>
+<p>Siparişi tamamlamak için sol tarafta bulunan ödeme yöntemlerinden birini seçiniz.</p></div>{script}""")
 
     @staticmethod
     def header_cart(count):

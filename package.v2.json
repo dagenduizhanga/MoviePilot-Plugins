@@ -15,11 +15,12 @@
     "name": "Oyunfor 礼品卡购买",
     "description": "在 oyunfor.com 自动购买 App Store 礼品卡（TL）：余额 / 币安 / 银行卡付款，验证推送给你；敏感信息全部加密。",
     "labels": "Oyunfor,App Store,礼品卡,币安",
-    "version": "1.3.4",
+    "version": "1.3.5",
     "icon": "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png",
     "author": "dagenduizhanga",
     "level": 1,
     "history": {
+      "v1.3.5": "修复余额不够时卡在购物车（没有进入结算页）：Oyunfor 购物车按钮余额不够时叫「Ödeme Yap」，会跳到补差额付款页，现在能在那里选银行卡 / 币安、选付款渠道，并跟进新标签页里的 PayTR；修复演练会点「Alışverişi Tamamla」—— 它在 Oyunfor 上会直接用余额下单，现在演练停在它前面，实买时它就是余额付款按钮；余额够但选了银行卡 / 币安时说明原因并停下；余额下单后跳到订单列表页时，从最新订单里取兑换码，不会拿到历史订单的码",
       "v1.3.4": "购物车：认出商品行右上角只有「×」的删除按钮，开跑前能真正清空购物车；购物车只有一行商品但「Adet」数量不对时，用 −/+ 改成要买的数量",
       "v1.3.3": "修复把「Yemeksepeti x Oyunfor」活动页（地址含 sepet）误当成购物车；购物车地址改为按路径段精确匹配；购物车「Sipariş Özeti」里的「Alışverişi Tamamla」确认是去付款页，演练也会点；应付金额识别「Tutar」",
       "v1.3.2": "修复加入购物车后进不了结算页：按链接地址找购物车（支持纯图标入口、非 /sepet 地址、侧边小购物车），排除 404 页；演练绝不点购物车里可能直接下单的提交按钮（Satın Al / Tamamla / Onayla 等，普通链接则直接打开）；演练时商品页优先「加入购物车」；付款方式支持「Oyunfor Bakiyesi / Cüzdan」等叫法；所有失败消息附带页面信息",
