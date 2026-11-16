@@ -113,7 +113,7 @@ def test_card_otp_wrong_then_right(oyun, site):
     # 第一行就说清楚：要输入验证码
     assert "需要输入验证码" in prompt["title"]
     assert "/oyunfor_code" in prompt["text"]
-    assert prompt["buttons"] == [[{"text": "❌ 取消购买", "callback_data": "[PLUGIN]OyunforGiftCard|cancel"}]]
+    assert prompt["buttons"][0][-1] == {"text": "❌ 取消购买", "callback_data": "[PLUGIN]OyunforGiftCard|cancel"}
     assert prompt.get("save_history") is False
     assert oyun._job.waiting == "otp"
     # 错误验证码：通过远程命令事件提交
@@ -153,8 +153,9 @@ def test_card_app_approval(oyun, site):
     ok, _ = oyun.start_purchase()
     assert ok
     prompt = wait_message(oyun, "付款验证")
-    assert prompt and "请在 App 里确认" in prompt["title"], oyun.messages
-    assert oyun._job.waiting == "app"
+    # 银行卡一律按「需要输入验证码」提醒，同时说明只在 App 确认的会自动继续
+    assert prompt and "需要输入验证码" in prompt["title"] and "App 里点确认" in prompt["text"], oyun.messages
+    assert oyun._job.waiting == "otp"
     # 用户点了按钮（只是告知），然后在银行 App 里批准
     oyun.handle_button(Event(EventType.MessageAction, {"plugin_id": "OyunforGiftCard", "text": "approved",
                                                        "userid": "u1", "channel": None}))
@@ -163,7 +164,7 @@ def test_card_app_approval(oyun, site):
     assert wait_idle(oyun, 90)
     record = oyun.get_data("history")[-1]
     assert record["code"] == "success", record
-    assert record["verification"] == "app"
+    assert record["verification"] == "otp"
     assert codes_of(oyun, record) == [f"X{order_id:05d}QZ1ABCDEFG"]
 
 
@@ -407,20 +408,20 @@ def test_card_rejected_by_gateway_fails_fast(oyun, site):
 
 # ---------------------------------------------------------------- 验证提醒的写法
 def test_okx_style_app_only_confirmation(oyun, site):
-    """OKX 卡：验证页上没有输入框，只能在 App 里确认 —— 消息第一行就要说清楚"""
+    """OKX 卡：验证页上没有输入框，只能在 App 里确认。提醒仍按「需要输入验证码」，并说明 App 确认会自动继续"""
     site.set(acs_mode="okx")
     _card(oyun)
     ok, _ = oyun.start_purchase()
     assert ok
     prompt = wait_message(oyun, "付款验证")
-    assert prompt and "请在 App 里确认" in prompt["title"], oyun.messages
+    assert prompt and "需要输入验证码" in prompt["title"], oyun.messages
     assert "OKX" in prompt["text"] and "不用回复" in prompt["text"]
     assert prompt["buttons"][0][0]["callback_data"] == "[PLUGIN]OyunforGiftCard|approved"
-    assert oyun._job.waiting == "app"
+    assert oyun._job.waiting == "otp"
     site.approve(max(orders(site)))
     assert wait_idle(oyun, 90)
     record = oyun.get_data("history")[-1]
-    assert record["code"] == "success" and record["verification"] == "app", record
+    assert record["code"] == "success" and record["verification"] == "otp", record
 
 
 def test_login_code_in_six_boxes_with_retry(oyun, site):
@@ -481,3 +482,19 @@ def test_legacy_plaintext_is_migrated_and_wiped(oyun, site):
     history = oyun.get_data("history")
     assert history[0]["codes"] == [] and codes_of(oyun, history[0]) == ["XOLDCODE00000001"]
     assert "XOLDCODE00000001" not in json.dumps(history)
+
+
+
+def test_bank_page_needs_send_code_click_and_early_code(oyun, site):
+    """银行验证页要先点「Kod Gönder」才出现输入框；验证码比输入框先到也要等着填进去"""
+    site.set(acs_mode="request")
+    _card(oyun)
+    ok, _ = oyun.start_purchase()
+    assert ok
+    prompt = wait_message(oyun, "付款验证")
+    assert prompt and "需要输入验证码" in prompt["title"], oyun.messages
+    oyun.submit_code("123456")
+    assert wait_idle(oyun, 90)
+    record = oyun.get_data("history")[-1]
+    assert record["code"] == "success", record
+    assert len(site.posts("/acs/request")) == 1 and site.state()["otp_attempts"] == 1

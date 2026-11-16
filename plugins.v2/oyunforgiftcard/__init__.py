@@ -449,32 +449,25 @@ class OyunforGiftCard(_PluginBase):
         return f"/oyunfor_{name}" + (f"_{suffix}" if suffix else "")
 
     def notify_verification(self, job: _Job, kind: str, detail: str):
-        """验证提醒：第一行就写明是「在 App 里确认」还是「回复验证码」"""
+        """验证提醒：银行卡付款一律按「需要输入验证码」提醒；登录验证码单独说明"""
         plugin_id = self.__class__.__name__
         minutes = max(1, self._verify_timeout // 60)
         cancel = {"text": "❌ 取消购买", "callback_data": f"[PLUGIN]{plugin_id}|cancel"}
-        if kind == "app":
-            title = "【Oyunfor 付款验证】请在 App 里确认"
-            lines = [
-                "👉 这笔付款要在你的 App 里确认（银行 / OKX 等发来的推送），打开 App 点确认即可。",
-                "确认后页面会自动继续，不用回复。",
-                f"如果收到的是验证码而不是推送：回复 {self._cmd('code')} 123456",
-            ]
-            buttons = [[{"text": "✅ 已在 App 确认", "callback_data": f"[PLUGIN]{plugin_id}|approved"}, cancel]]
-        elif kind == "login":
+        if kind == "login":
             title = "【Oyunfor 登录验证】需要验证码"
             lines = [
                 "Cookie 失效了，插件正在用账号密码登录，Oyunfor 发了一个验证码（通常在你的邮箱里）。",
-                f"👉 回复：{self._cmd('code')} 123456",
+                f"👉 收到后回复：{self._cmd('code')} 123456",
             ]
             buttons = [[cancel]]
         else:
             title = "【Oyunfor 付款验证】需要输入验证码"
             lines = [
-                "👉 这笔付款需要验证码（短信 / 邮件 / App 里显示的数字）。",
-                f"回复：{self._cmd('code')} 123456",
+                "👉 银行会把验证码发到你的手机（短信 / App 里显示），收到后回复：",
+                f"{self._cmd('code')} 123456",
+                "如果银行只要你在 App 里点确认（如 OKX），确认后页面会自动继续，不用回复。",
             ]
-            buttons = [[cancel]]
+            buttons = [[{"text": "✅ 已在 App 确认", "callback_data": f"[PLUGIN]{plugin_id}|approved"}, cancel]]
         lines.append(f"不想买了：{self._cmd('cancel')}；⏳ {minutes} 分钟内有效")
         if detail:
             lines.append(f"📄 页面：{detail[:100]}")
@@ -1185,10 +1178,8 @@ class OyunforGiftCard(_PluginBase):
                                                                 "title": "等待你用币安付款", "text": text}})
                 blocks += self._image_block(job.qr_path, "付款二维码", open_panel=True)
             elif job.waiting:
-                text = {
-                    "app": "请在你的 App 里确认这笔付款，确认后页面会自动继续。",
-                    "login": f"登录需要验证码（通常在邮箱里），发送 {self._cmd('code')} 验证码。",
-                }.get(job.waiting, f"需要验证码：发送 {self._cmd('code')} 验证码。")
+                text = (f"登录需要验证码（通常在邮箱里），发送 {self._cmd('code')} 验证码。" if job.waiting == "login"
+                        else f"付款需要验证码：发送 {self._cmd('code')} 验证码。只在 App 里确认的，确认后页面会自动继续。")
                 blocks.append({"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "class": "mb-3",
                                                                 "title": "等待你完成验证", "text": text}})
             blocks.append({"component": "VAlert", "props": {

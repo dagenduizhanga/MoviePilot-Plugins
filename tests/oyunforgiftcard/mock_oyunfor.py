@@ -58,6 +58,7 @@ def _default_state():
         "sessions": ["VALID"],
         "log": [],
         "otp_attempts": 0,
+        "acs_requested": [],
     }
 
 
@@ -291,6 +292,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.gateway_submit(data)
         if path == "/acs/submit":
             return self.acs_submit(data)
+        if path == "/acs/request":
+            order = int(data.get("order") or 0)
+            with LOCK:
+                STATE["acs_requested"].append(order)
+            return self.redirect(f"{self.gateway}/acs?order={order}")
         return self.send_html("not found", status=404)
 
     # ------------------------------------------------------------ 页面
@@ -485,6 +491,17 @@ document.getElementById('card_number').addEventListener('input', e => {{
         with LOCK:
             mode = STATE["acs_mode"]
             total = STATE["orders"].get(order, {}).get("total", 0)
+        if mode == "request":
+            with LOCK:
+                requested = order in STATE["acs_requested"]
+            if not requested:
+                # 先点「Kod Gönder」才出现验证码输入框
+                return f"""<!doctype html><html><head><meta charset="utf-8"><title>3D Secure</title></head><body>
+<h3>3D Secure Doğrulama</h3><p>OYUNFOR · TRY {total:.2f}</p>
+<p>Doğrulama kodunu almak için aşağıdaki butona tıklayın.</p>
+<form method="post" action="/acs/request"><input type="hidden" name="order" value="{order}">
+<button type="submit">Kod Gönder</button></form></body></html>"""
+            mode = "otp"
         if mode == "okx":
             # 仿 OKX 卡：只有「在 App 里确认」，没有任何输入框
             return f"""<!doctype html><html><head><meta charset="utf-8"><title>Secure payment</title></head><body>

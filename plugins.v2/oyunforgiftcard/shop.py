@@ -59,6 +59,8 @@ TEXT_PATTERNS: Dict[str, List[str]] = {
     "login_link": [r"^giris yap$", r"^giris$", r"^uye girisi$", r"^giris yap ?/ ?uye ol$", r"^login$", r"^sign in$"],
     "login_submit": [r"^giris yap$", r"^giris$", r"^oturum ac$", r"^login$", r"^sign in$", r"^devam$"],
     "otp_submit": [r"^(gonder|onayla|dogrula|devam|devam et|tamam|ileri|submit|confirm|continue|verify|ok|next)\b"],
+    "otp_request": [r"^(sms|kod|sifre|dogrulama kodu) ?(gonder|iste|al)\b", r"^(send|get|request) (sms|code|otp|passcode)\b",
+                    r"^(kodu|sifreyi) gonder\b"],
 }
 # 这些文字说明元素不是「付款方式选项」，而是充值/保存卡之类的入口
 PAYMENT_EXCLUDE = [r"yukle", r"top ?up", r"\bload\b", r"kaydet", r"\bsave\b", r"ekle$", r"talep", r"cek(im)?\b"]
@@ -412,7 +414,7 @@ JS_FIND_INPUT = "([kind, overrideSel]) => {" + _JS_FOLD + r"""
 }
 """
 
-JS_VERIFY_STATE = "([otpSel]) => {" + _JS_FOLD + r"""
+JS_VERIFY_STATE = "([otpSel, loose]) => {" + _JS_FOLD + r"""
     const text = fold(document.body ? document.body.innerText : '').slice(0, 8000);
     const verifyText = /(3d ?secure|3-d secure|\b3ds\b|dogrulama|tek kullanimlik|one[- ]?time|\botp\b|verification|\bsms\b|authenticat|authoris|authoriz|approve|digital token|digibank|secure ?code|id check|visa secure|safekey|guvenlik kodu|onay kodu|sifre)/.test(text);
     const appText = /(approve|authoris|authoriz|push notification|notification|digital token|digibank|banking app|mobile app|in-app|\bin (the|your) [a-z0-9 ]{0,20}\bapp\b|confirm (the |this |your )?(payment|purchase|transaction)|waiting for (your )?(confirmation|approval)|\bokx\b|revolut|\bwise\b|uygulama(niz|si)?(dan| uzerinden| ile)|mobil uygulama|onaylayin|onay bekleniyor|check your (phone|device|app)|open your)/.test(text);
@@ -450,7 +452,8 @@ JS_VERIFY_STATE = "([otpSel]) => {" + _JS_FOLD + r"""
     consider.sort((a, b) => a.score - b.score);
     if (consider.length && (verifyText || consider[0].score <= 0)) {
         const c = consider[0];
-        if (c.score <= 1 || consider.length === 1) otp = {id: mark(c.el), score: c.score};
+        // loose：银行验证页（外站）上只要有能输入的框，就当成验证码框
+        if (c.score <= 1 || consider.length === 1 || (loose && verifyText)) otp = {id: mark(c.el), score: c.score};
     }
     return {verifyText, appText, errorText, otp, inputs, title: document.title || '', snippet: text.slice(0, 240), url: location.href};
 }
@@ -1569,7 +1572,7 @@ class OyunforShop:
         best = None
         for frame in self._frames():
             try:
-                state = frame.evaluate(JS_VERIFY_STATE, [otp_sel])
+                state = frame.evaluate(JS_VERIFY_STATE, [otp_sel, not self.on_site(frame.url or "")])
             except Exception:  # noqa
                 continue
             if not isinstance(state, dict):
@@ -1633,7 +1636,7 @@ class OyunforShop:
         otp = {}
         for frame in self._frames():
             try:
-                state = frame.evaluate(JS_VERIFY_STATE, [None])
+                state = frame.evaluate(JS_VERIFY_STATE, [None, False])
                 if isinstance(state, dict) and state.get("otp"):
                     otp[frame.url] = state["otp"].get("id")
             except Exception:  # noqa
@@ -1686,6 +1689,7 @@ class OyunforShop:
         last_feedback = 0.0
         no_input_hint = 0.0
         pending_code = ""
+        requested_code = False
         deadline = time.time() + settle_timeout
         while True:
             now = time.time()
@@ -1717,8 +1721,14 @@ class OyunforShop:
             verify = self._verify_frame_state(ignore=baseline.get("otp"))
             if verify:
                 vframe, vstate = verify
-                # 有验证码输入框 = 要输入验证码；没有 = 只能在 App 里确认（如 OKX、DBS 的推送确认）
-                kind = "otp" if vstate.get("otp") else "app"
+                # 一律按「需要输入验证码」提醒（提醒里也说明：只在 App 里确认的，确认后会自动继续）
+                kind = "otp"
+                if not vstate.get("otp") and not requested_code:
+                    # 有的银行要先点「发送验证码」，输入框才出现
+                    request_btn = self.find("otp_request", frame=vframe, maxLen=30, selector=BUTTON_SELECTOR)
+                    if request_btn:
+                        requested_code = True
+                        self.click(request_btn, frame=vframe, what=f"请求验证码（{request_btn.get('text')}）")
                 if verify_started is None:
                     verify_started = time.time()
                     deadline = verify_started + verify_timeout + settle_timeout
@@ -1737,10 +1747,10 @@ class OyunforShop:
                         self.snap(f"otp-submitted-{attempts}", html=False)
                         if attempts >= 5:
                             self.note("验证码已提交 5 次")
-                    elif now - no_input_hint > 10:
+                    elif not no_input_hint:
+                        # 验证码先到了、输入框还没出现：先存着，出现后自动填入
                         no_input_hint = now
-                        pending_code = ""
-                        interaction.verification_feedback("当前验证页没有验证码输入框，请在银行 App 中确认")
+                        interaction.verification_feedback("已收到验证码，验证页的输入框出现后会自动填入")
                 elif command == "ok":
                     self.note("用户表示已在 App 中确认，继续等待页面跳转")
                     found = self.find("otp_submit", frame=vframe, maxLen=30,
