@@ -7,12 +7,16 @@
 """
 import io
 import json
+import os
+import re
 import time
 import zipfile
+from pathlib import Path
 
 import pytest
 
-from .conftest import CARD, URL, Site, browser_env, make_config, reset_plugin_data, wait_idle, wait_message
+from .conftest import (CARD, COOKIE, URL, Site, browser_env, codes_of, make_config, reset_plugin_data, set_secrets,
+                       wait_idle, wait_message)
 
 PID = "OyunforGiftCard"
 
@@ -57,6 +61,7 @@ def host():
             instance.messages.append(kwargs)
 
         instance.post_message = collect
+        set_secrets(instance, cookie=COOKIE)
         Site.reset()
         yield client, instance
         instance.post_message = original
@@ -67,7 +72,7 @@ def test_host_loaded_plugin(host):
     client, instance = host
     resp = client.get("/api/v1/plugin/installed")
     assert resp.status_code == 200 and PID in resp.json()
-    assert instance.plugin_version == "1.2.0"
+    assert instance.plugin_version == "1.3.0"
     assert instance.get_state() is False
 
 
@@ -92,7 +97,11 @@ def test_form_endpoint(host):
 
     walk(data["conf"])
     assert components <= {"VForm", "VRow", "VCol", "VSwitch", "VTextField", "VTextarea", "VSelect",
-                          "VCronField", "VAlert"}
+                          "VCronField", "VAlert", "VBtn", "VExpansionPanels", "VExpansionPanel",
+                          "VExpansionPanelText"}
+    # 设置表里没有任何敏感字段
+    for key in ("cookie", "username", "password", "card_number", "card_cvv", "card_expiry", "card_holder"):
+        assert key not in data["model"]
 
 
 def test_save_config_runs_dry_run_once(host):
@@ -132,25 +141,68 @@ def test_status_command_through_event_bus(host):
     assert account["logged_in"] is True and account["balance"] == 1500.0
 
 
-def test_card_purchase_with_code_from_web_form(host):
-    """3DS 等待中：在网页插件设置里填验证码并保存（走宿主保存配置接口）"""
+def _secure_link(client):
+    """从设置页拿到一次性的安全录入链接"""
+    form = json.dumps(client.get(f"/api/v1/plugin/form/{PID}").json()["conf"], ensure_ascii=False)
+    match = re.search(r"(/api/v1/plugin/OyunforGiftCard/secure\?t=[A-Za-z0-9_\-]+)", form)
+    assert match, form[:500]
+    return match.group(1)
+
+
+def test_secure_entry_page(host):
+    """敏感信息走安全录入页：匿名但必须带一次性令牌；校验卡号；不进设置表；一次性"""
+    client, instance = host
+    link = _secure_link(client)
+    token = link.split("t=", 1)[1]
+    anon = {"Authorization": "Bearer invalid"}
+    page = client.get(link, headers=anon)
+    assert page.status_code == 200 and "安全录入" in page.text
+    assert page.headers["cache-control"].startswith("no-store") and page.headers["x-frame-options"] == "DENY"
+    assert "default-src 'none'" in page.headers["content-security-policy"]
+    assert client.get(f"/api/v1/plugin/{PID}/secure?t=wrong", headers=anon).status_code == 403
+    # 卡号校验位不对：什么都不保存，链接还能用
+    bad = client.post(f"/api/v1/plugin/{PID}/secure", data={"t": token, "card_number": "4242424242424241"},
+                      headers=anon)
+    assert bad.status_code == 400 and "校验位" in bad.text
+    assert "card_number" not in (instance.get_data("vault_meta") or {})
+    good = client.post(f"/api/v1/plugin/{PID}/secure", headers=anon, data={
+        "t": token, "card_number": "4242 4242 4242 4242", "card_expiry": "12/30", "card_cvv": "123",
+        "card_holder": "Test User", "username": "user@example.com", "password": "Pw-HostLeak-77aa"})
+    assert good.status_code == 200 and "已加密保存" in good.text
+    # 回显只有打码后的提示
+    assert "4242 4242" not in good.text and "•••• 4242" in good.text and "Pw-HostLeak" not in good.text
+    # 一次性：再用同一个令牌提交被拒绝
+    again = client.post(f"/api/v1/plugin/{PID}/secure", data={"t": token, "card_cvv": "999"}, headers=anon)
+    assert again.status_code == 403
+    secrets_now = instance.read_secrets()
+    assert secrets_now["card_number"] == "4242424242424242" and secrets_now["card_holder"] == "TEST USER"
+    config = client.get(f"/api/v1/plugin/{PID}").json()
+    assert not any(key in config for key in ("card_number", "card_cvv", "password", "cookie", "username"))
+    # 整个配置目录（MoviePilot 数据库、日志、插件数据）里没有明文
+    root = Path(os.environ["CONFIG_DIR"])
+    needles = [b"4242424242424242", b"Pw-HostLeak-77aa", b"TEST USER", b"user@example.com"]
+    hits = [(str(p), n) for p in root.rglob("*") if p.is_file() for n in needles if n in p.read_bytes()]
+    assert not hits, hits
+
+
+def test_card_purchase_with_secure_card(host):
+    """用安全录入的卡完成一次 3DS（验证码经 HTTP 接口提交）"""
+    from app.core.config import settings
+
     client, instance = host
     Site.reset()
-    config = make_config(pay_mode="card", **CARD)
-    resp = client.put(f"/api/v1/plugin/{PID}", json=config)
-    assert resp.json()["success"] is True
+    instance.del_data("known_fp")
+    assert client.put(f"/api/v1/plugin/{PID}", json=make_config(pay_mode="card")).json()["success"]
     start = len(instance.messages)
     ok, message = instance.start_purchase()
     assert ok, message
-    assert wait_message(instance, "需要你验证付款", start=start), instance.messages[start:]
-    resp = client.put(f"/api/v1/plugin/{PID}", json=dict(config, verify_code="123456"))
-    assert resp.json()["success"] is True
-    # 验证码字段保存后被清空，任务继续
-    assert client.get(f"/api/v1/plugin/{PID}").json()["verify_code"] == ""
+    assert wait_message(instance, "付款验证", start=start), instance.messages[start:]
+    resp = client.get(f"/api/v1/plugin/{PID}/code", params={"code": "123456", "apikey": settings.API_TOKEN})
+    assert resp.status_code == 200 and resp.json()["success"] is True, resp.text
     assert wait_idle(instance, 90)
     record = instance.get_data("history")[-1]
     assert record["code"] == "success", record
-    assert record["codes"] == ["X01001QZ1ABCDEFG"]
+    assert codes_of(instance, record) == ["X01001QZ1ABCDEFG"]
 
 
 def test_card_purchase_with_code_from_api_and_button(host):
@@ -160,13 +212,14 @@ def test_card_purchase_with_code_from_api_and_button(host):
     from app.core.event import eventmanager
     from app.schemas.types import EventType
 
-    assert client.put(f"/api/v1/plugin/{PID}", json=make_config(pay_mode="card", **CARD)).json()["success"]
-    # 模拟站点重置后订单号会重复，清掉插件记住的旧兑换码
-    instance.del_data("known_codes")
+    assert client.put(f"/api/v1/plugin/{PID}", json=make_config(pay_mode="card")).json()["success"]
+    set_secrets(instance, **CARD)
+    # 模拟站点重置后订单号会重复，清掉插件记住的旧兑换码指纹
+    instance.del_data("known_fp")
     start = len(instance.messages)
     ok, message = instance.start_purchase()
     assert ok, message
-    assert wait_message(instance, "需要你验证付款", start=start)
+    assert wait_message(instance, "付款验证", start=start)
     resp = client.get(f"/api/v1/plugin/{PID}/code", params={"code": "123456", "apikey": settings.API_TOKEN})
     assert resp.status_code == 200 and resp.json()["success"] is True, resp.text
     assert wait_idle(instance, 90)
@@ -178,7 +231,7 @@ def test_card_purchase_with_code_from_api_and_button(host):
     start = len(instance.messages)
     ok, _ = instance.start_purchase()
     assert ok
-    assert wait_message(instance, "需要你验证付款", start=start)
+    assert wait_message(instance, "付款验证", start=start)
     eventmanager.send_event(EventType.MessageAction, {"plugin_id": PID, "text": "cancel", "userid": "7",
                                                       "channel": None})
     assert wait_idle(instance, 60)
@@ -190,7 +243,7 @@ def test_binance_qr_endpoint_is_anonymous_with_token(host):
     client, instance = host
     Site.reset()
     assert client.put(f"/api/v1/plugin/{PID}", json=make_config(pay_mode="binance")).json()["success"]
-    instance.del_data("known_codes")
+    instance.del_data("known_fp")
     start = len(instance.messages)
     ok, message = instance.start_purchase()
     assert ok, message

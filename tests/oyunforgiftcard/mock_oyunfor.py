@@ -42,6 +42,7 @@ def _default_state():
         "stock": True,
         "acs_mode": "otp",            # otp / app / none
         "require_sms_login": False,
+        "login_code_style": "email",   # email / boxes
         "success_shows_code": True,
         "checkout_style": "radios",   # radios / buttons
         "show_buy_now": True,
@@ -245,17 +246,18 @@ class Handler(BaseHTTPRequestHandler):
             if data.get("email") == "user@example.com" and data.get("password") == "secret":
                 with LOCK:
                     sms = STATE["require_sms_login"]
+                    style = STATE["login_code_style"]
                 if sms:
-                    return self.send_html(self.page("Doğrulama", """<h1>SMS Doğrulama</h1>
-<p>Telefonunuza gönderilen doğrulama kodunu girin.</p>
-<form method="post" action="/giris/dogrula"><input type="text" name="sms_kodu" maxlength="6" placeholder="Doğrulama kodu">
-<button type="submit">Doğrula</button></form>""", logged=""))
+                    return self.send_html(self.login_code_page(style))
                 return self.login_ok()
             return self.send_html(self.page("Giriş Yap", "<h1>Üye Girişi</h1><p>E-posta veya şifre hatalı.</p>"))
         if path == "/giris/dogrula":
-            if data.get("sms_kodu") == LOGIN_SMS:
+            code = data.get("email_kodu") or "".join(data.get(f"k{i}", "") for i in range(6))
+            if code == LOGIN_SMS:
                 return self.login_ok()
-            return self.send_html(self.page("Doğrulama", "<p>Kod hatalı</p>", logged=""))
+            with LOCK:
+                style = STATE["login_code_style"]
+            return self.send_html(self.login_code_page(style, error="Doğrulama kodu hatalı."))
         if path in ("/sepet/ekle", "/sepet/hemen-al"):
             product = data.get("product")
             qty = max(1, int(data.get("adet") or 1))
@@ -466,10 +468,34 @@ document.getElementById('card_number').addEventListener('input', e => {{
             return self.send_html(self.top_redirect(f"{self.main}/siparis/basarili?order={order}"))
         return self.redirect(f"{self.gateway}/acs?order={order}")
 
+    def login_code_page(self, style, error=""):
+        """登录后的邮箱验证码页（仿常见写法：一个框 / 六个一位的框）"""
+        err = f'<p class="alert">{html.escape(error)}</p>' if error else ""
+        if style == "boxes":
+            boxes = "".join(f'<input type="text" name="k{i}" maxlength="1" inputmode="numeric" style="width:32px">'
+                            for i in range(6))
+            field = f'<div class="otp-boxes">{boxes}</div>'
+        else:
+            field = '<input type="text" name="email_kodu" maxlength="6" placeholder="E-posta doğrulama kodu">'
+        return self.page("Doğrulama", f"""<h1>E-posta Doğrulama</h1>{err}
+<p>E-posta adresinize gönderilen 6 haneli doğrulama kodunu girin.</p>
+<form method="post" action="/giris/dogrula">{field}<button type="submit">Doğrula</button></form>""", logged="")
+
     def acs_page(self, order, error=""):
         with LOCK:
             mode = STATE["acs_mode"]
             total = STATE["orders"].get(order, {}).get("total", 0)
+        if mode == "okx":
+            # 仿 OKX 卡：只有「在 App 里确认」，没有任何输入框
+            return f"""<!doctype html><html><head><meta charset="utf-8"><title>Secure payment</title></head><body>
+<h3>Confirm your payment</h3><p>OYUNFOR · TRY {total:.2f}</p>
+<p>Open the OKX app and confirm this payment. Waiting for your confirmation…</p>
+<script>
+setInterval(async () => {{
+  const r = await fetch('/acs/status?order={order}'); const j = await r.json();
+  if (j.approved) {{ location.href = '/acs/done?order={order}'; }}
+}}, 800);
+</script></body></html>"""
         if mode == "app":
             return f"""<!doctype html><html><head><meta charset="utf-8"><title>DBS Card Authentication</title></head><body>
 <h3>Authenticate your transaction</h3><p>Merchant: OYUNFOR  Amount: TRY {total:.2f}</p>

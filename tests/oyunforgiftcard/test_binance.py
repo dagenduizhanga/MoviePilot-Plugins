@@ -6,7 +6,7 @@ import time
 from app.core.event import Event
 from app.schemas.types import EventType
 
-from .conftest import make_config, run, wait_idle, wait_message
+from .conftest import codes_of, make_config, run, wait_idle, wait_message
 
 
 def _binance(oyun, **extra):
@@ -43,11 +43,14 @@ def test_binance_onsite_qr_and_link_then_auto_redirect(oyun, site):
     assert job.waiting == "binance"
     assert prompt["image"] == f"http://127.0.0.1:3001/api/v1/plugin/OyunforGiftCard/qr?token={job.qr_token}"
     # 二维码是 220px 的那张图，不是 24px 的币安 Logo
+    import io
     from PIL import Image
-    with Image.open(job.qr_path) as image:
+    # 二维码文件也是加密保存的
+    assert job.qr_path.name.endswith(".png.enc") and not job.qr_path.read_bytes().startswith(b"\x89PNG")
+    with Image.open(io.BytesIO(oyun._read_run_file(job.qr_path))) as image:
         assert image.size[0] >= 200 and image.size[1] >= 200
-    # 二维码接口：令牌正确才给图
-    assert oyun.api_qr(job.qr_token).path == str(job.qr_path)
+    # 二维码接口：令牌正确才给图（解密后返回）
+    assert oyun.api_qr(job.qr_token).body == oyun._read_run_file(job.qr_path)
     assert oyun.api_qr("wrong").status_code == 404
     page = str(oyun.get_page())
     assert "等待你用币安付款" in page and "data:image/png;base64," in page
@@ -56,7 +59,7 @@ def test_binance_onsite_qr_and_link_then_auto_redirect(oyun, site):
     assert wait_idle(oyun, 90)
     record = oyun.get_data("history")[-1]
     assert record["code"] == "success", record
-    assert record["codes"] == ["X01001QZ1ABCDEFG"]
+    assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
     assert record["crypto"] == "6,25 USDT"
     assert record["verification"] == "binance"
     final = oyun.messages[-1]
@@ -76,7 +79,7 @@ def test_binance_page_not_redirecting_user_says_paid(oyun, site):
     assert wait_idle(oyun, 90)
     record = oyun.get_data("history")[-1]
     assert record["code"] == "success", record
-    assert record["codes"] == ["X01001QZ1ABCDEFG"]
+    assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
 
 
 def test_binance_hosted_checkout(oyun, site):
@@ -91,7 +94,7 @@ def test_binance_hosted_checkout(oyun, site):
     assert wait_idle(oyun, 90)
     record = oyun.get_data("history")[-1]
     assert record["code"] == "success", record
-    assert record["codes"] == ["X01001QZ1ABCDEFG"]
+    assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
 
 
 def test_binance_option_is_a_button(oyun, site):

@@ -27,7 +27,7 @@ def playwright_proxy(address: Optional[str]) -> Optional[Dict[str, str]]:
 
 
 def launch_browser(headless: bool = False, proxy: Optional[Dict[str, str]] = None,
-                   storage_state: Optional[Path] = None, locale: str = "tr-TR",
+                   storage_state: Optional[Any] = None, locale: str = "tr-TR",
                    humanize: bool = False, log: Callable[[str], None] = print,
                    browser_type: str = "chromium") -> Tuple[Any, Callable[[], None], str]:
     """
@@ -35,7 +35,10 @@ def launch_browser(headless: bool = False, proxy: Optional[Dict[str, str]] = Non
     :return: (context, 关闭函数, 引擎说明)
     """
     context_kwargs: Dict[str, Any] = {"viewport": {"width": 1366, "height": 900}}
-    if storage_state and Path(storage_state).exists():
+    if isinstance(storage_state, dict):
+        # 解密后的登录状态直接以内存对象传入，不落明文文件
+        context_kwargs["storage_state"] = storage_state
+    elif storage_state and Path(storage_state).exists():
         context_kwargs["storage_state"] = str(storage_state)
     if locale:
         context_kwargs["locale"] = locale

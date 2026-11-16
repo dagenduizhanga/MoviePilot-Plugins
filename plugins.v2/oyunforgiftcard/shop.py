@@ -415,12 +415,22 @@ JS_FIND_INPUT = "([kind, overrideSel]) => {" + _JS_FOLD + r"""
 JS_VERIFY_STATE = "([otpSel]) => {" + _JS_FOLD + r"""
     const text = fold(document.body ? document.body.innerText : '').slice(0, 8000);
     const verifyText = /(3d ?secure|3-d secure|\b3ds\b|dogrulama|tek kullanimlik|one[- ]?time|\botp\b|verification|\bsms\b|authenticat|authoris|authoriz|approve|digital token|digibank|secure ?code|id check|visa secure|safekey|guvenlik kodu|onay kodu|sifre)/.test(text);
-    const appText = /(approve|authoris|authoriz|push notification|digital token|digibank|banking app|mobile app|in-app|uygulama(niz|si)? (uzerinden|ile|dan)|mobil uygulama|check your (phone|device|app)|open your)/.test(text);
+    const appText = /(approve|authoris|authoriz|push notification|notification|digital token|digibank|banking app|mobile app|in-app|\bin (the|your) [a-z0-9 ]{0,20}\bapp\b|confirm (the |this |your )?(payment|purchase|transaction)|waiting for (your )?(confirmation|approval)|\bokx\b|revolut|\bwise\b|uygulama(niz|si)?(dan| uzerinden| ile)|mobil uygulama|onaylayin|onay bekleniyor|check your (phone|device|app)|open your)/.test(text);
     const errorText = /(hatali|yanlis|incorrect|invalid|wrong|gecersiz|tekrar deneyin|try again|did not match|eslesmedi)/.test(text);
-    const cardRe = /(card|kart|cc[-_]|owner|holder|isim|ad ?soyad|cvv|cvc|cvc2|expir|son kullanma|month|year|holder|sahibi|\bpan\b|kupon|coupon|indirim|promo|referans|reference|search|arama|e-?posta|email|telefon numarasi|phone number|posta ?kodu|postal|zip|adet|quantity|qty)/;
+    // 一定不是验证码框的（卡信息、优惠券、搜索、数量等）
+    const cardRe = /(card|kart|cc[-_]|owner|holder|isim|ad ?soyad|cvv|cvc|cvc2|expir|son kullanma|month|year|sahibi|\bpan\b|kupon|coupon|indirim|promo|referans|reference|search|arama|posta ?kodu|postal|zip|adet|quantity|qty)/;
+    // 邮箱/手机号输入框：除非同时写着「验证码」，否则不是验证码框
+    const contactRe = /(e-?posta|email|e-mail|\bmail\b|telefon|phone|gsm)/;
     const otpRe = /(otp|sms|code|kod|sifre|password|passcode|\bpin\b|token|verif|dogrula|onay)/;
     let otp = null, inputs = 0;
     const consider = [];
+    // 一格一位的验证码（4~8 个 maxlength=1 的输入框）
+    const singles = Array.from(document.querySelectorAll('input')).filter(el => visible(el) && !el.disabled && !el.readOnly
+        && /^(text|tel|number|password)$/.test((el.getAttribute('type') || 'text').toLowerCase()) && el.maxLength === 1);
+    if (singles.length >= 4 && singles.length <= 8) {
+        return {verifyText, appText, errorText, otp: {id: mark(singles[0]), group: singles.map(mark), score: 0},
+                inputs: singles.length, title: document.title || '', snippet: text.slice(0, 240), url: location.href};
+    }
     if (otpSel) { for (const el of document.querySelectorAll(otpSel)) { if (visible(el)) { consider.push({el, score: -1}); } } }
     for (const el of document.querySelectorAll('input')) {
         const type = (el.getAttribute('type') || 'text').toLowerCase();
@@ -429,6 +439,8 @@ JS_VERIFY_STATE = "([otpSel]) => {" + _JS_FOLD + r"""
         inputs++;
         const d = fold([el.name, el.id, el.getAttribute('placeholder'), el.getAttribute('aria-label'), el.getAttribute('autocomplete'), typeof el.className === 'string' ? el.className : ''].join(' '));
         if (cardRe.test(d) && !/(otp|sms|one-time-code)/.test(d)) continue;
+        if (contactRe.test(d) && !/(otp|sms|one-time-code|code|kod|dogrula|verif)/.test(d)) continue;
+        if (/(current-password|new-password)/.test((el.getAttribute('autocomplete') || '').toLowerCase())) continue;
         let score = null;
         if (/one-time-code/.test((el.getAttribute('autocomplete') || '').toLowerCase()) || otpRe.test(d)) score = 0;
         else if (el.maxLength >= 4 && el.maxLength <= 10) score = 1;
@@ -637,24 +649,39 @@ class Interaction:
 
 
 class StepRecorder:
-    """每一步的截图与页面源码，保存在插件数据目录，便于排查和适配"""
+    """
+    每一步的截图与页面源码，保存在插件数据目录，便于排查和适配。
+    传入 vault 时所有文件都先加密再落盘（文件名以 .enc 结尾），只在需要查看时解密到内存。
+    """
 
-    def __init__(self, directory: Optional[Path], log: Callable[[str], None]):
+    def __init__(self, directory: Optional[Path], log: Callable[[str], None], vault: Any = None):
         self.directory = directory
         self.log = log
+        self.vault = vault
         self.index = 0
         self.steps: List[str] = []
+        self.lines: List[str] = []
         self.last_screenshot: Optional[Path] = None
         if directory:
             directory.mkdir(parents=True, exist_ok=True)
 
+    def write(self, name: str, data: bytes) -> Optional[Path]:
+        """写一个诊断文件（有 vault 时加密）"""
+        if not self.directory:
+            return None
+        if self.vault is not None:
+            return self.vault.write_file(self.directory / f"{name}.enc", data, purpose="run")
+        path = self.directory / name
+        path.write_bytes(data)
+        return path
+
     def note(self, text: str):
         self.steps.append(text)
         self.log(text)
+        self.lines.append(f"{time.strftime('%H:%M:%S')} {text}")
         if self.directory:
             try:
-                with open(self.directory / "steps.log", "a", encoding="utf-8") as handle:
-                    handle.write(f"{time.strftime('%H:%M:%S')} {text}\n")
+                self.write("steps.log", ("\n".join(self.lines) + "\n").encode("utf-8"))
             except Exception:  # noqa
                 pass
 
@@ -663,28 +690,34 @@ class StepRecorder:
             return None
         self.index += 1
         stem = f"{self.index:02d}-{re.sub(r'[^a-zA-Z0-9_-]+', '_', name)[:40]}"
-        shot = self.directory / f"{stem}.jpg"
+        shot = None
         try:
-            kwargs: Dict[str, Any] = {"path": str(shot), "type": "jpeg", "quality": 60, "full_page": True,
-                                      "timeout": 15000}
-            if mask:
-                kwargs["mask"] = mask
-            page.screenshot(**kwargs)
+            kwargs: Dict[str, Any] = {"type": "jpeg", "quality": 60, "full_page": True, "timeout": 15000}
+            # 兑换码在截图里也遮住（文件本身已加密，这是第二道保险）
+            masks = list(mask or [])
+            try:
+                codes = page.locator("text=/X[A-Z0-9]{15}/")
+                if codes.count():
+                    masks.append(codes)
+            except Exception:  # noqa
+                pass
+            if masks:
+                kwargs["mask"] = masks
+            shot = self.write(f"{stem}.jpg", page.screenshot(**kwargs))
             self.last_screenshot = shot
         except Exception as err:
             self.log(f"截图失败（{name}）：{str(err)[:120]}")
-            shot = None
         if html:
             try:
                 frames = [frame.url for frame in page.frames]
                 header = "<!-- url: %s\n frames:\n %s\n-->\n" % (page.url, "\n ".join(frames))
-                (self.directory / f"{stem}.html").write_text(header + sanitize_html(page.content()), encoding="utf-8")
+                self.write(f"{stem}.html", (header + sanitize_html(page.content())).encode("utf-8"))
                 for i, frame in enumerate(page.frames[1:6], start=1):
                     try:
                         if not frame.url or frame.url.startswith("about:"):
                             continue
-                        (self.directory / f"{stem}.frame{i}.html").write_text(
-                            f"<!-- url: {frame.url} -->\n" + sanitize_html(frame.content()), encoding="utf-8")
+                        self.write(f"{stem}.frame{i}.html",
+                                   (f"<!-- url: {frame.url} -->\n" + sanitize_html(frame.content())).encode("utf-8"))
                     except Exception:  # noqa
                         continue
             except Exception as err:
@@ -693,9 +726,11 @@ class StepRecorder:
 
 
 def sanitize_html(content: str) -> str:
-    """保存页面源码前去掉输入框里的值和像卡号的长数字，避免敏感信息落盘"""
+    """保存页面源码前去掉输入框里的值、像卡号的长数字和兑换码（文件还会再加密，这是第二道保险）"""
     text = re.sub(r'(<input\b[^>]*?\bvalue=")([^"]*)(")', r"\1***\3", content or "", flags=re.I)
     text = re.sub(r"(<input\b[^>]*?\bvalue=')([^']*)(')", r"\1***\3", text, flags=re.I)
+    text = APPLE_CODE_RE.sub("[code]", text)
+    text = APPLE_CODE_GROUPED_RE.sub("[code]", text)
     return re.sub(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)", "[redacted]", text)
 
 
@@ -943,7 +978,7 @@ class OyunforShop:
             return None
 
     def login(self, username: str, password: str, interaction: Optional[Interaction] = None,
-              verify_timeout: int = 180) -> Tuple[bool, str]:
+              verify_timeout: int = 300) -> Tuple[bool, str]:
         """账号密码登录（尽力而为：遇到图形验证码直接放弃）"""
         opened = False
         override = self.overrides.get("login_url")
@@ -967,7 +1002,7 @@ class OyunforShop:
         if not email_input:
             self.snap("login-page")
             return False, "没有找到账号输入框"
-        self._fill(email_input, username, "账号")
+        self._fill(email_input, username, "账号", secret=True)
         self._fill(password_input, password, "密码", secret=True)
         captcha = False
         try:
@@ -987,11 +1022,11 @@ class OyunforShop:
         state = self.is_logged_in()
         if state:
             return True, "登录成功"
-        # 登录后要求短信验证码
+        # 登录后要求验证码（Oyunfor 会发到邮箱）
         if interaction:
-            verify = self._verify_frame_state()
+            verify = None if self._login_form_showing() else self._verify_frame_state()
             if verify and verify[1].get("otp"):
-                ok = self._relay_codes(interaction, verify_timeout, purpose="登录验证")
+                ok = self._relay_codes(interaction, verify_timeout, purpose="login")
                 if ok:
                     self.settle()
                     if self.is_logged_in():
@@ -1426,7 +1461,7 @@ class OyunforShop:
         self._fill(self._find_input("number", target), number, "卡号", frame=target, secret=True, digits=True)
         holder = self._find_input("holder", target)
         if holder and card.holder:
-            self._fill(holder, card.holder, "持卡人", frame=target)
+            self._fill(holder, card.holder, "持卡人", frame=target, secret=True)
         expiry = self._find_input("expiry", target)
         if expiry:
             self._fill_expiry(expiry, month, year, target)
@@ -1512,6 +1547,7 @@ class OyunforShop:
     def _fill_part(self, found: Dict[str, Any], values: List[str], frame: Any, what: str):
         locator = frame.locator(f'[data-mpx="{found["id"]}"]').first
         if found.get("tag") == "select":
+            self.card_masks.append(locator)
             options = locator.evaluate("el => Array.from(el.options).map(o => [o.value, o.text])")
             for value in values:
                 for opt_value, opt_text in options:
@@ -1521,7 +1557,7 @@ class OyunforShop:
                         return
             raise FlowError("failed", f"{what}下拉框里没有 {values[0]}")
         self._fill(found, values[0] if int(found.get("maxlength") or -1) != 2 else values[0][-2:], what, frame=frame,
-                   digits=True)
+                   digits=True, secret=True)
 
     # ------------------------------------------------------------ 提交后：结果 / 3DS
     def _verify_frame_state(self, ignore: Optional[Dict[str, Any]] = None) -> Optional[Tuple[Any, Dict[str, Any]]]:
@@ -1681,7 +1717,8 @@ class OyunforShop:
             verify = self._verify_frame_state(ignore=baseline.get("otp"))
             if verify:
                 vframe, vstate = verify
-                kind = "otp" if vstate.get("otp") else ("app" if vstate.get("appText") else "unknown")
+                # 有验证码输入框 = 要输入验证码；没有 = 只能在 App 里确认（如 OKX、DBS 的推送确认）
+                kind = "otp" if vstate.get("otp") else "app"
                 if verify_started is None:
                     verify_started = time.time()
                     deadline = verify_started + verify_timeout + settle_timeout
@@ -1734,14 +1771,23 @@ class OyunforShop:
 
     def _submit_otp(self, frame: Any, otp: Dict[str, Any], code: str):
         locator = frame.locator(f'[data-mpx="{otp["id"]}"]').first
-        try:
-            locator.fill("", timeout=3000)
-        except Exception:  # noqa
-            pass
-        try:
-            locator.press_sequentially(code, delay=random.randint(60, 120))
-        except Exception:  # noqa
-            locator.fill(code)
+        if otp.get("group"):
+            # 一格一位：逐格填写
+            for marker, char in zip(otp["group"], code):
+                box = frame.locator(f'[data-mpx="{marker}"]').first
+                try:
+                    box.fill(char, timeout=3000)
+                except Exception:  # noqa
+                    box.press_sequentially(char)
+        else:
+            try:
+                locator.fill("", timeout=3000)
+            except Exception:  # noqa
+                pass
+            try:
+                locator.press_sequentially(code, delay=random.randint(60, 120))
+            except Exception:  # noqa
+                locator.fill(code)
         self.note("已填入验证码")
         self.pause(0.4, 0.9)
         found = self.find("otp_submit", frame=frame, maxLen=30,
@@ -1752,28 +1798,50 @@ class OyunforShop:
             locator.press("Enter")
             self.note("按回车提交验证码")
 
-    def _relay_codes(self, interaction: Interaction, timeout: int, purpose: str) -> bool:
-        """登录等非付款场景的验证码转发：返回是否已提交"""
+    def _login_form_showing(self) -> bool:
+        return bool(self._find_input("password") and self._find_input("email"))
+
+    def _relay_codes(self, interaction: Interaction, timeout: int, purpose: str = "login") -> bool:
+        """
+        登录验证码（通常发到邮箱）转发：把验证码请求推送给用户，收到后填入。
+        验证码错误时提示重发，最多 3 次。返回是否已经提交过验证码。
+        """
         start = time.time()
         notified = False
+        attempts = 0
+        pending = ""
+        last_feedback = 0.0
         while time.time() - start < timeout:
-            verify = self._verify_frame_state()
-            if not verify:
-                return notified
+            command = interaction.poll()
+            if command == "cancel" or interaction.cancelled():
+                return False
+            if command and command != "ok":
+                pending = command
+            verify = None if self._login_form_showing() else self._verify_frame_state()
+            if not verify or not verify[1].get("otp"):
+                return attempts > 0
             frame, state = verify
             if not notified:
                 shot = self.snap(f"verify-{purpose}")
-                interaction.verification_needed("otp", f"{purpose}：{state.get('snippet', '')}", 0, shot)
+                interaction.verification_needed(purpose, state.get("snippet", ""), 0, shot)
                 notified = True
-            command = interaction.poll()
-            if command == "cancel":
-                return False
-            if command and command != "ok" and state.get("otp"):
-                self._submit_otp(frame, state["otp"], command)
+            if pending:
+                attempts += 1
+                self._submit_otp(frame, state["otp"], pending)
+                pending = ""
                 self.settle()
-                return True
-            time.sleep(1)
-        return False
+                self.pause(1.0, 2.0)
+                if self.is_logged_in() or attempts >= 3:
+                    return True
+                again = self._verify_frame_state()
+                if again and again[1].get("errorText") and time.time() - last_feedback > 3:
+                    last_feedback = time.time()
+                    interaction.verification_feedback("验证码不对或已过期，请重新发送（重新登录可能会发来新的验证码）")
+            try:
+                self.page.wait_for_timeout(1000)
+            except Exception:  # noqa
+                time.sleep(1)
+        return attempts > 0
 
     # ------------------------------------------------------------ 币安支付
     @staticmethod
@@ -1835,10 +1903,9 @@ class OyunforShop:
         if not self.recorder.directory:
             return None
         self.recorder.index += 1
-        path = self.recorder.directory / f"{self.recorder.index:02d}-{name}.png"
         try:
-            frame.locator(f'[data-mpx="{marker["id"]}"]').first.screenshot(path=str(path), timeout=10000)
-            return path
+            data = frame.locator(f'[data-mpx="{marker["id"]}"]').first.screenshot(timeout=10000)
+            return self.recorder.write(f"{self.recorder.index:02d}-{name}.png", data)
         except Exception as err:
             self.note(f"二维码截图失败：{str(err)[:120]}")
             return None
@@ -1885,7 +1952,7 @@ class OyunforShop:
         binance_paid = False
         last_check = 0.0
         last_signature = ""
-        known = list(known or [])
+        known = known if known is not None else ()
         while True:
             now = time.time()
             if shown_at is None and now - start > appear_timeout:
@@ -1996,7 +2063,7 @@ class OyunforShop:
 
     def collect_codes(self, known: Iterable[str], quantity: int = 1) -> Tuple[List[str], str]:
         """在结果页/订单页找新的兑换码"""
-        known_set = set(known or [])
+        known_set = known if known is not None else ()
 
         def fresh(items: List[str]) -> List[str]:
             return [c for c in items if c not in known_set]

@@ -7,7 +7,7 @@
 | 插件 | 说明 |
 | --- | --- |
 | [NodeSeek签到（过盾版）](plugins.v2/nodeseekcheckin/README.md) | NodeSeek 每日签到，直连被 Cloudflare 拦截时自动用 MoviePilot 内置浏览器过盾后再签到 |
-| [Oyunfor 礼品卡购买](plugins.v2/oyunforgiftcard/README.md) | 在 oyunfor.com 自动购买 App Store 礼品卡（TL）：把币安付款码推给你，付款后推送兑换码；也支持余额、银行卡（3DS 转发）；默认演练模式 |
+| [Oyunfor 礼品卡购买](plugins.v2/oyunforgiftcard/README.md) | 在 oyunfor.com 自动购买 App Store 礼品卡（TL）：余额 / 币安 / 银行卡付款，验证推送给你确认；敏感信息全部加密（需设置 `OYUNFOR_SECRET`）；默认演练模式 |
 
 ## 安装
 

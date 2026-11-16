@@ -11,6 +11,10 @@ from pathlib import Path
 import pytest
 import requests
 
+# 测试用的加密口令（真实环境由 docker 环境变量提供）
+TEST_SECRET = "unit-test-secret-9f3K-7Qp2-Lm8x"
+os.environ["OYUNFOR_SECRET"] = TEST_SECRET
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 HOST = Path(os.environ.get("MP_HOST_DIR", "")).resolve()
@@ -26,7 +30,8 @@ import mock_oyunfor  # noqa: E402
 
 PORT = 18766
 URL = f"http://127.0.0.1:{PORT}"
-CARD = {"card_number": "4242 4242 4242 4242", "card_holder": "TEST USER", "card_expiry": "12/30", "card_cvv": "123"}
+CARD = {"card_number": "4242424242424242", "card_holder": "TEST USER", "card_expiry": "12/30", "card_cvv": "123"}
+COOKIE = "oyf_session=VALID"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -67,17 +72,27 @@ class Site:
 def make_config(**overrides):
     config = {
         "enabled": True, "notify": True, "onlyonce": False, "dry_run": False,
-        "cookie": "oyf_session=VALID", "username": "", "password": "",
         "amount": "250", "product_url": "", "quantity": 1,
-        "pay_mode": "balance", "pay_timeout": 15, "card_use_saved": False, "card_last4": "",
-        "card_number": "", "card_holder": "", "card_expiry": "", "card_cvv": "",
+        "pay_mode": "balance", "pay_timeout": 15,
         "max_total": 2000, "daily_limit": 0, "verify_timeout": 120,
-        "verify_code": "", "cron": "", "use_proxy": False, "proxy_url": "", "nav_timeout": 30,
+        "cron": "", "use_proxy": False, "proxy_url": "", "nav_timeout": 30,
         "headless": False, "clear_cart": True, "show_code": True, "keep_runs": 100,
         "selectors": "", "history_days": 180,
     }
     config.update(overrides)
     return config
+
+
+def set_secrets(instance, **values):
+    """模拟在安全录入页保存（None = 删除）"""
+    instance.store_secrets(values)
+
+
+def codes_of(instance, record):
+    """历史记录里的兑换码是加密的：解密后返回"""
+    if not record.get("codes_enc"):
+        return []
+    return instance._vault.decrypt(record["codes_enc"], purpose="codes")
 
 
 def browser_env(monkeypatch):
@@ -88,10 +103,12 @@ def browser_env(monkeypatch):
 
 
 def reset_plugin_data(instance):
-    for key in ("history", "known_codes", "account", "last_screenshot", "state_hash"):
+    for key in ("history", "known_codes", "known_fp", "account", "last_screenshot", "state_hash", "vault",
+                "vault_meta"):
         instance.del_data(key)
     data_path = instance.get_data_path()
-    (data_path / "storage_state.json").unlink(missing_ok=True)
+    for name in ("storage_state.json", "session.enc"):
+        (data_path / name).unlink(missing_ok=True)
     shutil.rmtree(data_path / "runs", ignore_errors=True)
 
 
@@ -118,6 +135,7 @@ def oyun(site, monkeypatch):
 
     monkeypatch.setattr(instance, "post_message", fake_post_message)
     instance.init_plugin(make_config())
+    set_secrets(instance, cookie=COOKIE)
     yield instance
     wait_idle(instance, 60)
 
