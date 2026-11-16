@@ -599,3 +599,25 @@ def test_real_like_cart_page_with_alisverisi_tamamla(oyun, site):
     oyun.init_plugin(make_config(amount="100"))
     record = run(oyun)
     assert record["code"] == "success", record
+
+
+
+def test_real_cart_row_close_icon_clears_leftovers(oyun, site):
+    """真实购物车：删除只有右上角一个「×」（没有文字和提示）—— 演练留下的商品也要能清掉"""
+    site.set(cart_row_style="real", header_cart="icon", cart_button="tamamla_submit", cart="100,250")
+    oyun.init_plugin(make_config(amount="100"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert record["total"] == 105.0
+    assert len(site.posts("/sepet/sil")) == 2
+    assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
+
+
+def test_cart_quantity_is_aligned(oyun, site):
+    """加入购物车后数量变成了 2（比如网站合并了上次的同款），插件用「−」改回 1 再结算"""
+    site.set(cart_row_style="real", cart_button="tamamla_submit", add_qty="2")
+    oyun.init_plugin(make_config(amount="100"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert record["total"] == 105.0
+    assert [item["data"].get("op") for item in site.posts("/sepet/adet")] == ["minus"]

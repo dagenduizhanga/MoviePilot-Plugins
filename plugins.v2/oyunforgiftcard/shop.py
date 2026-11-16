@@ -616,6 +616,55 @@ JS_CART_LINK = r"""
 }
 """
 
+# 购物车商品行上的「×」删除按钮（没有文字、只有符号或图标）
+JS_CART_REMOVE = "() => {" + _JS_FOLD + r"""
+    const iconText = /^[×✕✖✗xX]$/;
+    const clsRe = /(remove|delete|trash|close|times|\bsil\b|kaldir|cikar)/i;
+    const cands = Array.from(document.querySelectorAll('a,button,span,i,div,[role=button]')).filter(el => {
+        if (!visible(el)) return false;
+        const t = (el.innerText || '').trim();
+        if (t.length > 2) return false;
+        const meta = (typeof el.className === 'string' ? el.className : '') + ' ' + (el.getAttribute('aria-label') || '')
+            + ' ' + (el.getAttribute('title') || '');
+        return iconText.test(t) || (t === '' && clsRe.test(meta));
+    });
+    for (const el of cands) {
+        if (el.closest('[role=dialog],.modal,header,nav')) continue;
+        // 只认购物车商品行里的：行里要有数量 / 输入框和价格
+        let node = el.parentElement;
+        for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+            const text = fold(node.innerText || '');
+            if ((node.querySelector('input') || /\badet\b|quantity|\bqty\b/.test(text)) && /\d\s*(tl|₺)/.test(text)) {
+                const btn = el.closest('a,button,[role=button],[onclick]') || el;
+                return {id: mark(btn), text: '×'};
+            }
+        }
+    }
+    return null;
+}
+"""
+
+# 购物车里的数量框（「Adet」+ −/+ 按钮）
+JS_CART_QTY = "() => {" + _JS_FOLD + r"""
+    const out = [];
+    for (const el of document.querySelectorAll('input')) {
+        if (!visible(el) || el.disabled || !/^(text|number|tel|)$/i.test(el.getAttribute('type') || '')) continue;
+        if (!/^\d{1,2}$/.test((el.value || '').trim())) continue;
+        const desc = fold([el.name, el.id, typeof el.className === 'string' ? el.className : '',
+                           el.getAttribute('aria-label'), el.getAttribute('placeholder')].join(' '));
+        let near = '', node = el.parentElement;
+        for (let i = 0; i < 3 && node; i++, node = node.parentElement) near += ' ' + fold(node.innerText || '');
+        const box = el.parentElement;
+        const btns = box ? Array.from(box.querySelectorAll('a,button,span,[role=button]')).filter(visible) : [];
+        const minus = btns.find(b => /^[−\-–]$/.test((b.innerText || '').trim()));
+        const plus = btns.find(b => /^\+$/.test((b.innerText || '').trim()));
+        if (!/(adet|qty|quantity|miktar|piece)/.test(desc) && !/\badet\b/.test(near) && !(minus && plus)) continue;
+        out.push({id: mark(el), value: parseInt(el.value, 10), minus: minus ? mark(minus) : null, plus: plus ? mark(plus) : null});
+    }
+    return out;
+}
+"""
+
 # 失败时报告「插件在页面上看到了什么」，方便对照真实页面调整
 JS_PAGE_SUMMARY = "() => {" + _JS_FOLD + r"""
     const h1 = Array.from(document.querySelectorAll('h1')).find(visible);
@@ -1453,6 +1502,12 @@ class OyunforShop:
                 except Exception:  # noqa
                     found = None
             if not found:
+                # 商品行右上角只有一个「×」
+                try:
+                    found = self.page.evaluate(JS_CART_REMOVE)
+                except Exception:  # noqa
+                    found = None
+            if not found:
                 break
             if not self.click(found, what=f"移出购物车（{found.get('text')}）"):
                 break
@@ -1466,6 +1521,36 @@ class OyunforShop:
             self.note(f"购物车已清理 {removed} 次")
             self.snap("cart-cleared")
         return removed
+
+    def align_cart_quantity(self, quantity: int) -> bool:
+        """购物车里只有一行商品、但「Adet」数量不对时，改成要买的数量（优先点 −/+，其次直接改输入框）"""
+        for _ in range(12):
+            try:
+                items = self.page.evaluate(JS_CART_QTY) or []
+            except Exception:  # noqa
+                return False
+            if len(items) != 1:
+                return False
+            item = items[0]
+            current = int(item.get("value") or 0)
+            if current == quantity:
+                return True
+            button = item.get("minus") if current > quantity else item.get("plus")
+            self.note(f"购物车里的数量是 {current}，改成 {quantity}")
+            if button:
+                self.click({"id": button, "text": "−" if current > quantity else "+"},
+                           what="减少数量" if current > quantity else "增加数量")
+            else:
+                locator = self.page.locator(f'[data-mpx="{item["id"]}"]').first
+                try:
+                    locator.fill(str(quantity))
+                    locator.dispatch_event("change")
+                    locator.press("Enter")
+                except Exception:  # noqa
+                    return False
+            self.settle(5)
+            self.pause(0.6, 1.2)
+        return False
 
     def _proceed(self, found: Dict[str, Any], dry_run: bool, what: str):
         """
@@ -1518,6 +1603,7 @@ class OyunforShop:
                 break
             if not self._looks_like_cart():
                 break
+            self.align_cart_quantity(quantity)
             self.snap("cart")
             found = self.find("checkout", maxLen=40, exclude=[r"alisverise devam", r"continue shopping"])
             if not found:

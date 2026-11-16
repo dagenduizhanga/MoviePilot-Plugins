@@ -46,6 +46,8 @@ def _default_state():
         "success_shows_code": True,
         "checkout_style": "radios",   # radios / buttons
         "show_buy_now": True,
+        "cart_row_style": "plain",      # plain / real（真实购物车：右上角 ×、Adet 数量框带 −/+）
+        "add_qty": 1,                   # 列表上点一次加入购物车加几件（模拟数量异常）
         "cart_path": "/sepet",          # 购物车地址
         "header_cart": "text",          # text / icon（只有购物车图标和数量）
         "cart_button": "odemeye_gec",   # odemeye_gec / satinal_link / satinal_submit
@@ -273,6 +275,9 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/sepet/ekle", "/sepet/hemen-al"):
             product = data.get("product")
             qty = max(1, int(data.get("adet") or 1))
+            if data.get("from") in ("liste", "ajax"):
+                with LOCK:
+                    qty = int(STATE["add_qty"])
             item = {"product": product, "qty": qty}
             if product == "custom":
                 try:
@@ -293,6 +298,18 @@ class Handler(BaseHTTPRequestHandler):
             if data.get("from") == "liste":
                 return self.redirect(f"{CATEGORY}?added=1")
             return self.redirect(f"{CATEGORY}/{PRODUCTS[product]['slug']}?added=1")
+        if path == "/sepet/adet":
+            idx = int(data.get("index") or 0)
+            with LOCK:
+                if 0 <= idx < len(STATE["cart"]):
+                    item = STATE["cart"][idx]
+                    if data.get("op") == "minus":
+                        item["qty"] = max(1, item["qty"] - 1)
+                    elif data.get("op") == "plus":
+                        item["qty"] += 1
+                    elif (data.get("adet") or "").isdigit():
+                        item["qty"] = max(1, int(data["adet"]))
+            return self.redirect(STATE["cart_path"])
         if path == "/sepet/onay":
             return self.redirect("/odeme")
         if path == "/sepet/sil":
@@ -409,10 +426,23 @@ setTimeout(() => {
             total = self.cart_total()
         if not cart:
             return self.page("Sepetim", "<h1>Sepetim</h1><p>Sepetinizde ürün bulunmamaktadır.</p>")
-        rows = "".join(f"""<tr><td>{html.escape(PRODUCTS[i['product']]['title'])}</td><td>{i['qty']}</td>
+        with LOCK:
+            row_style = STATE["cart_row_style"]
+        if row_style == "real":
+            rows = "".join(f"""<div class="cart-item" style="position:relative;border:1px solid #ddd;padding:12px;margin:8px 0">
+<form method="post" action="/sepet/sil" style="position:absolute;right:8px;top:4px"><input type="hidden" name="index" value="{n}">
+<button type="submit" class="close" style="border:0;background:none;font-size:20px">×</button></form>
+<div class="name">{html.escape(PRODUCTS[i['product']].get('listing') or PRODUCTS[i['product']]['title'])}</div>
+<div class="unit"><small>Adet Fiyatı</small> {self.item_price(i):.2f} TL</div>
+<form method="post" action="/sepet/adet" class="qty"><small>Adet</small><input type="hidden" name="index" value="{n}">
+<button type="submit" name="op" value="minus" class="qty-btn">−</button><input type="text" name="adet" value="{i['qty']}" class="qty-input" style="width:40px">
+<button type="submit" name="op" value="plus" class="qty-btn">+</button></form></div>"""
+                           for n, i in enumerate(cart))
+        else:
+            rows = "".join(f"""<tr><td>{html.escape(PRODUCTS[i['product']]['title'])}</td><td>{i['qty']}</td>
 <td>{money(self.item_price(i) * i['qty'])} TL</td>
 <td><form method="post" action="/sepet/sil"><input type="hidden" name="index" value="{n}"><button type="submit" title="Sil" class="btn-remove">✕</button></form></td></tr>"""
-                       for n, i in enumerate(cart))
+                           for n, i in enumerate(cart))
         return self.page("Sepetim", f"""<h1>Sepetim</h1><table>{rows}</table>
 <div class="summary"><h3>Sipariş Özeti</h3><div class="cart-total">Tutar: {total:.2f} TL</div></div><a href="/" class="btn">Alışverişe Devam Et</a>
 {self.cart_button()}""")
