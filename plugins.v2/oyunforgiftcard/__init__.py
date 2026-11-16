@@ -52,6 +52,7 @@ STATUS_TEXT = {
     "unknown": "结果未知",
     "error": "出错",
     "blocked": "被拦截",
+    "site_error": "网站出错",
     "login_required": "需要登录",
     "out_of_stock": "缺货",
     "limit": "超出限额",
@@ -149,7 +150,7 @@ class OyunforGiftCard(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png"
     # 插件版本
-    plugin_version = "1.3.5"
+    plugin_version = "1.3.6"
     # 插件作者
     plugin_author = "dagenduizhanga"
     # 作者主页

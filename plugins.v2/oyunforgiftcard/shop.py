@@ -716,6 +716,24 @@ JS_CHALLENGE = r"""
 }
 """
 
+# Cloudflare 的 5xx 错误页（520 = 网站源服务器返回了异常响应，一般是 Oyunfor 自己暂时出错）：返回错误码，否则返回空串
+JS_CF_ERROR = r"""
+() => {
+    const title = document.title || '';
+    const h1 = (document.querySelector('h1') || {}).innerText || '';
+    const cf = !!document.querySelector('#cf-wrapper, #cf-error-details, .cf-error-code');
+    const text = title + ' ' + h1 + ' ' + ((document.querySelector('#cf-error-details, #cf-wrapper') || {}).innerText || '');
+    let m = text.match(/error code:?\s*(5\d\d)\b/i) || title.match(/\|\s*(5\d\d):/);
+    if (!m && cf) {
+        const el = document.querySelector('.cf-error-code');
+        m = el && el.innerText.match(/(5\d\d)/);
+    }
+    return m && (cf || /cloudflare/i.test(document.body ? document.body.innerText : '')) ? m[1] : '';
+}
+"""
+# Cloudflare 5xx 错误页重试前等待的秒数
+CF_ERROR_RETRY_WAITS = (5, 15, 30)
+
 
 # ---------------------------------------------------------------- 数据结构
 @dataclass
@@ -970,18 +988,41 @@ class OyunforShop:
 
     def goto(self, path: str, what: str = "") -> None:
         target = self.url(path)
+        for attempt in range(len(CF_ERROR_RETRY_WAITS) + 1):
+            try:
+                self.page.goto(target, wait_until="domcontentloaded", timeout=self.nav_timeout * 1000)
+            except Exception as err:
+                self.note(f"打开 {what or target} 时出现异常（继续）：{str(err)[:160]}")
+            passed, reason = self.wait_challenge(self.nav_timeout)
+            if not passed:
+                self.snap("challenge")
+                raise FlowError("blocked", reason)
+            try:
+                self.page.wait_for_load_state("load", timeout=15000)
+            except Exception:  # noqa
+                pass
+            code = self.cf_error_code()
+            if not code:
+                return
+            if attempt >= len(CF_ERROR_RETRY_WAITS):
+                break
+            wait = CF_ERROR_RETRY_WAITS[attempt]
+            self.note(f"打开 {what or target} 时 Oyunfor 网站返回 Cloudflare 错误 {code}（网站暂时出错），"
+                      f"{wait} 秒后重试（第 {attempt + 1} 次）")
+            try:
+                self.page.wait_for_timeout(int(wait * 1000 * min(1.0, max(self.pause_scale, 0.02))))
+            except Exception:  # noqa
+                time.sleep(1)
+        self.snap("site-error")
+        raise FlowError("site_error", f"Oyunfor 网站暂时出错（Cloudflare 错误 {code}，打开{what or '页面'}时出现），"
+                                      f"重试 {len(CF_ERROR_RETRY_WAITS)} 次仍不行。这是网站那边的问题，稍后再试即可")
+
+    def cf_error_code(self) -> str:
+        """当前页面如果是 Cloudflare 5xx 错误页（如 520），返回错误码"""
         try:
-            self.page.goto(target, wait_until="domcontentloaded", timeout=self.nav_timeout * 1000)
-        except Exception as err:
-            self.note(f"打开 {what or target} 时出现异常（继续）：{str(err)[:160]}")
-        passed, reason = self.wait_challenge(self.nav_timeout)
-        if not passed:
-            self.snap("challenge")
-            raise FlowError("blocked", reason)
-        try:
-            self.page.wait_for_load_state("load", timeout=15000)
+            return str(self.page.evaluate(JS_CF_ERROR) or "")
         except Exception:  # noqa
-            pass
+            return ""
 
     def page_text(self, frame: Any = None) -> Dict[str, str]:
         target = frame or self.page
@@ -2502,7 +2543,9 @@ class OyunforShop:
     def _page_ok(self) -> bool:
         data = self.page_text()
         title = fold(data.get("title"))
-        return not re.search(r"(404|bulunamadi|not found|hata)", title)
+        if re.search(r"(404|bulunamadi|not found|hata)", title):
+            return False
+        return not self.cf_error_code()
 
 
 # ---------------------------------------------------------------- 整体流程
@@ -2654,6 +2697,10 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
         result.status = err.status
         result.message = err.message
         paid = paid or err.paid
+        if paid and err.status not in ("success", "paid_no_code", "unknown"):
+            # 已经点过付款：之后任何中断都不能说成「失败 / 稍后再试」，否则可能重复购买
+            result.status = "unknown"
+            result.message = f"付款后中断：{err.message}。结果未知，请到 Oyunfor 订单页核对，不要重复购买"
         if err.status not in ("dry_run",):
             shop.snap(f"stop-{err.status}")
     except Exception as err:  # noqa

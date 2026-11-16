@@ -663,3 +663,23 @@ def test_cart_quantity_is_aligned(oyun, site):
     assert record["code"] == "success", record
     assert record["total"] == 105.0
     assert [item["data"].get("op") for item in site.posts("/sepet/adet")] == ["minus"]
+
+
+# ---------------------------------------------------------------- 网站出错
+def test_cloudflare_520_is_retried(oyun, site):
+    """Oyunfor 偶尔返回 Cloudflare 520（源服务器出错）：等一会儿重试，恢复后照常购买"""
+    site.set(cf_error_left="2")
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
+
+
+def test_cloudflare_520_keeps_failing(oyun, site):
+    """一直 520：重试几次后停下，说明是网站的问题；不会把错误页标题当成商品名，也不会加购物车"""
+    site.set(cf_error_left="9")
+    oyun.init_plugin(make_config(dry_run=True))
+    record = run(oyun)
+    assert record["code"] == "site_error", record
+    assert "520" in record["message"] and "稍后再试" in record["message"], record
+    assert "Web server" not in (record.get("product") or "")
+    assert not site.posts("/sepet/ekle")

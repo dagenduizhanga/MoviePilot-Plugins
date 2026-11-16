@@ -31,6 +31,15 @@ PRODUCTS = {
              "title": "2000 TL Tutarında App Store & iTunes Hediye Kartı", "price": 2050.0},
 }
 CATEGORY = "/apple-store/apple-store-itunes-gift-card"
+# 仿 Cloudflare 520 错误页（源服务器返回了异常响应）
+CF_520_PAGE = """<!doctype html><html lang="en-US"><head><meta charset="utf-8">
+<title>oyunfor.com | 520: Web server is returning an unknown error</title></head><body>
+<div id="cf-wrapper"><div id="cf-error-details" class="p-0"><header class="mx-auto pt-10">
+<h1><span class="inline-block">Web server is returning an unknown error</span>
+<span class="code-label">Error code 520</span></h1>
+<div>Visit <a href="https://www.cloudflare.com/5xx-error-landing">cloudflare.com</a> for more information.</div></header>
+<div class="cf-section">Browser Working · <a href="https://www.cloudflare.com/5xx-error-landing">Cloudflare</a> Working · oyunfor.com Host Error</div>
+<p>Your IP: <button type="button" class="cf-footer-ip-reveal-btn">Click to reveal</button></p></div></div></body></html>"""
 GOOD_CARD = {"number": "4242424242424242", "month": "12", "year": "2030", "cvv": "123"}
 OTP = "123456"
 LOGIN_SMS = "654321"
@@ -50,7 +59,9 @@ def _default_state():
         "add_qty": 1,                   # 列表上点一次加入购物车加几件（模拟数量异常）
         "cart_path": "/sepet",          # 购物车地址
         "header_cart": "text",          # text / icon（只有购物车图标和数量）
-        "cart_button": "odemeye_gec",   # odemeye_gec / satinal_link / satinal_submit
+        "cart_button": "odemeye_gec",   # odemeye_gec / satinal_link / satinal_submit / tamamla_submit / oyunfor
+        "cf_error_path": CATEGORY,      # 这个地址接下来 cf_error_left 次返回 Cloudflare 520 错误页
+        "cf_error_left": 0,
         "balance_label": "Bakiye ile Öde",
         "listing_style": "plain",      # plain / ajax / nobuttons / empty
         "binance_mode": "onsite",      # onsite / hosted
@@ -168,6 +179,12 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/__admin"):
             return self.admin(path, query)
         self.log({"method": "GET", "path": path})
+        with LOCK:
+            cf_error = STATE["cf_error_left"] > 0 and path == STATE["cf_error_path"]
+            if cf_error:
+                STATE["cf_error_left"] -= 1
+        if cf_error:
+            return self.send_html(CF_520_PAGE, status=520)
         if path == "/":
             return self.send_html(self.page("Ana Sayfa", "<h1>Türkiye'nin epin sitesi</h1>"))
         if path == "/mocanetwork/yemeksepeti":
@@ -841,6 +858,8 @@ setInterval(async () => {{ const r = await fetch('/binance/status?order={order}'
                         STATE[key] = value in ("1", "true", "yes")
                     elif key == "cart":
                         STATE["cart"] = [{"product": p, "qty": 1} for p in value.split(",") if p]
+                    elif key == "cf_error_left":
+                        STATE[key] = int(value)
                     else:
                         STATE[key] = value
                 return self.send_json({"ok": True})
