@@ -752,6 +752,12 @@ CF_ERROR_RETRY_WAITS = (5, 15, 30)
 # 点击后等「网络空闲」、打开页面后等「全部加载完」的上限（秒）
 SETTLE_IDLE_MAX = 3.0
 PAGE_LOAD_MAX = 6.0
+# 币安付款页：链接出来后最多再等几秒二维码，再推送（只推一条带二维码的消息）
+BINANCE_QR_GRACE = 8.0
+# 这些步骤的截图存整页 + 页面源码（出错、停下、演练结束时排查用）；其余步骤只截可见区域、不存源码，省时间
+DETAIL_SNAP_RE = re.compile(r"^(stop-|exception|no-|dry-run|product-no-button|product-mismatch|payment-options|"
+                            r"challenge|site-error|listing-unrecognized|gateway-error|card-missing|binance-not-shown|"
+                            r"binance-timeout|binance-expired|timeout|verify-timeout|result-failed|login-)")
 
 
 # ---------------------------------------------------------------- 数据结构
@@ -881,14 +887,15 @@ class StepRecorder:
             except Exception:  # noqa
                 pass
 
-    def snap(self, page: Any, name: str, html: bool = True, mask: Optional[List[Any]] = None) -> Optional[Path]:
+    def snap(self, page: Any, name: str, html: bool = True, mask: Optional[List[Any]] = None,
+             full_page: bool = True) -> Optional[Path]:
         if not self.directory or page is None:
             return None
         self.index += 1
         stem = f"{self.index:02d}-{re.sub(r'[^a-zA-Z0-9_-]+', '_', name)[:40]}"
         shot = None
         try:
-            kwargs: Dict[str, Any] = {"type": "jpeg", "quality": 60, "full_page": True, "timeout": 15000}
+            kwargs: Dict[str, Any] = {"type": "jpeg", "quality": 60, "full_page": full_page, "timeout": 15000}
             # 兑换码在截图里也遮住（文件本身已加密，这是第二道保险）
             masks = list(mask or [])
             try:
@@ -968,7 +975,9 @@ class OyunforShop:
                     live.append(locator)
             except Exception:  # noqa
                 continue
-        return self.recorder.snap(self.page, name, html=html, mask=live or None)
+        # 平常的步骤只截可见区域、不存源码；出错 / 停下 / 演练结束才存整页和源码
+        detail = bool(DETAIL_SNAP_RE.match(name))
+        return self.recorder.snap(self.page, name, html=html and detail, mask=live or None, full_page=detail)
 
     def pause(self, low: float = 0.6, high: float = 1.4):
         seconds = random.uniform(low, high) * self.pause_scale
@@ -1314,7 +1323,8 @@ class OyunforShop:
             last = len(cards)
             try:
                 self.page.evaluate("() => window.scrollBy(0, Math.max(400, window.innerHeight))")
-                self.page.wait_for_timeout(1000)
+                # 已经有商品了只是确认数量稳定，等短一点
+                self.page.wait_for_timeout(400 if cards else 1000)
             except Exception:  # noqa
                 time.sleep(1)
             cards = self.product_cards()
@@ -2414,10 +2424,11 @@ class OyunforShop:
             raise FlowError("failed", "点击付款按钮失败")
         start = time.time()
         shown_at = None
+        seen_at = None
         user_paid = False
         binance_paid = False
         last_check = 0.0
-        last_signature = ""
+        last_links = ""
         known = known if known is not None else ()
         while True:
             now = time.time()
@@ -2455,22 +2466,25 @@ class OyunforShop:
                 elif not binance_paid and any(re.search(p, text) for p in BINANCE_EXPIRED_TEXT) and shown_at:
                     self.snap("binance-expired")
                     return OUT_TIMEOUT, "币安付款单已过期或关闭", [], "", user_paid
-                signature = "|".join(info.get("links") or []) + "|" + str(bool(info.get("qr")))
-                if shown_at is None or (signature != last_signature and not binance_paid):
-                    last_signature = signature
-                    first = shown_at is None
+                links = "|".join(info.get("links") or [])
+                seen_at = seen_at or now
+                # 币安页面上链接先出来、二维码要再画一会儿：第一次推送等二维码（最多 BINANCE_QR_GRACE 秒），
+                # 只推一条带二维码的消息；之后只有付款链接变了才重推
+                first_ready = shown_at is None and (info.get("qr") or now - seen_at >= BINANCE_QR_GRACE)
+                relink = shown_at is not None and links and links != last_links and not binance_paid
+                if first_ready or relink:
+                    last_links = links
                     shown_at = shown_at or time.time()
                     shot = self.snap("binance-pay")
                     qr = self._snap_element(bframe, info["qr"], "binance-qr") if info.get("qr") else None
                     self.note(f"币安付款信息：金额 {info.get('amount') or '?'} {info.get('currency') or ''}，"
                               f"倒计时 {info.get('countdown') or '?'}，链接 {len(info.get('links') or [])} 个，"
                               f"二维码 {'有' if qr else '无'}")
-                    if first or info.get("links"):
-                        interaction.payment_needed(info, qr, shot)
+                    interaction.payment_needed(info, qr, shot)
 
             if shown_at is not None:
-                # 付款后 Oyunfor 页面不一定自动跳转：定期去订单页看看
-                interval = 20 if (user_paid or binance_paid) else 90
+                # 付款后 Oyunfor 页面不一定自动跳转：定期去订单页看看（币安显示已付款 / 用户说已付款后查得更勤）
+                interval = 10 if (user_paid or binance_paid) else 30
                 if now - last_check > interval:
                     last_check = now
                     codes, order_url = self.check_codes_in_tab(known, quantity)

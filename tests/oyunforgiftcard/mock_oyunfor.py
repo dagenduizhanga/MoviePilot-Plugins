@@ -67,6 +67,7 @@ def _default_state():
         "binance_mode": "onsite",      # onsite / hosted
         "binance_autoredirect": True,
         "binance_paid": [],
+        "binance_qr_delay": 0,          # 币安收银台的二维码晚多少毫秒才出现（真实页面链接先出、二维码后画）
         "saved_card": False,
         "gateway_style": "classic",     # classic / paytr2026（真实 PayTR 新页面：Tailwind class、Radix 单选、type=button 付款按钮）
         "cart": [],
@@ -818,18 +819,23 @@ setInterval(async () => {{ const r = await fetch('/odeme/binance/status?order={o
         with LOCK:
             amount = self.usdt(order).replace(",", ".")
             paid = order in STATE["binance_paid"]
+            qr_delay = int(STATE["binance_qr_delay"])
         if paid:
             return f"""<!doctype html><html><head><meta charset="utf-8"><title>Binance Pay</title></head><body>
 <h2>Payment Successful</h2><p>Redirecting to merchant...</p>
 <script>setTimeout(() => location.href = {json.dumps(self.main + '/siparis/basarili?order=' + str(order))}, 1500);</script></body></html>"""
         return f"""<!doctype html><html><head><meta charset="utf-8"><title>Binance Pay Checkout</title></head><body>
 <h2>Binance Pay</h2><p>Merchant: OYUNFOR</p><p>{amount} USDT</p><p>Expires in 59:30</p>
-<canvas class="qrcode" width="240" height="240" id="qr"></canvas>
+<div id="qr-box"></div>
 <p>Scan with the Binance app to pay</p>
 <a href="bnc://app.binance.com/payment/secpay?linkToken=HT{order}">Pay with Binance App</a>
 <script>
-const c = document.getElementById('qr').getContext('2d'); c.fillStyle = '#fff'; c.fillRect(0, 0, 240, 240); c.fillStyle = '#000';
-for (let y = 0; y < 24; y++) for (let x = 0; x < 24; x++) if ((x * 5 + y * 11) % 3 === 0) c.fillRect(x * 10, y * 10, 10, 10);
+// 真实币安收银台：链接先出来，二维码过一会儿才画出来（binance_qr_delay 毫秒）
+setTimeout(() => {{
+  document.getElementById('qr-box').innerHTML = '<canvas class="qrcode" width="240" height="240" id="qr"></canvas>';
+  const c = document.getElementById('qr').getContext('2d'); c.fillStyle = '#fff'; c.fillRect(0, 0, 240, 240); c.fillStyle = '#000';
+  for (let y = 0; y < 24; y++) for (let x = 0; x < 24; x++) if ((x * 5 + y * 11) % 3 === 0) c.fillRect(x * 10, y * 10, 10, 10);
+}}, {qr_delay});
 setInterval(async () => {{ const r = await fetch('/binance/status?order={order}'); const j = await r.json(); if (j.paid) location.reload(); }}, 800);
 </script></body></html>"""
 
@@ -894,7 +900,7 @@ setInterval(async () => {{ const r = await fetch('/binance/status?order={order}'
                         STATE[key] = value in ("1", "true", "yes")
                     elif key == "cart":
                         STATE["cart"] = [{"product": p, "qty": 1} for p in value.split(",") if p]
-                    elif key == "cf_error_left":
+                    elif key in ("cf_error_left", "binance_qr_delay"):
                         STATE[key] = int(value)
                     else:
                         STATE[key] = value

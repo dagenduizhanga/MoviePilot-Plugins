@@ -159,7 +159,7 @@ class OyunforGiftCard(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png"
     # 插件版本
-    plugin_version = "1.4.0"
+    plugin_version = "1.1.0"
     # 插件作者
     plugin_author = "dagenduizhanga"
     # 作者主页
@@ -459,7 +459,7 @@ class OyunforGiftCard(_PluginBase):
     def _cmd(self, name: str) -> str:
         plugin_id = self.__class__.__name__
         suffix = plugin_id[len(BASE_PLUGIN_ID):].lower() if plugin_id.startswith(BASE_PLUGIN_ID) else ""
-        return f"/oyunfor_{name}" + (f"_{suffix}" if suffix else "")
+        return "/oyunfor" + (f"_{name}" if name else "") + (f"_{suffix}" if suffix else "")
 
     def notify_verification(self, job: _Job, kind: str, detail: str):
         """验证提醒：银行卡付款一律按「需要输入验证码」提醒；登录验证码单独说明"""
@@ -863,7 +863,8 @@ class OyunforGiftCard(_PluginBase):
 
     def get_command(self) -> List[Dict[str, Any]]:
         commands = [
-            ("buy", "Oyunfor 购买礼品卡（不带参数=点按钮选面额；或直接写 面额 数量，如 250 1）"),
+            ("", "Oyunfor 买礼品卡：发 /oyunfor 弹出面额按钮；/oyunfor 250 直接买 1 张 250 TL"),
+            ("buy", "Oyunfor 购买礼品卡（同 /oyunfor；参数：面额 数量，如 250 2）"),
             ("code", "Oyunfor 提交验证码（参数：验证码；不带参数=已在App确认）"),
             ("paid", "Oyunfor 我已用币安付款（让插件去订单页确认）"),
             ("cancel", "Oyunfor 取消当前购买"),
@@ -874,7 +875,8 @@ class OyunforGiftCard(_PluginBase):
             "event": EventType.PluginAction,
             "desc": desc,
             "category": "Oyunfor",
-            "data": {"action": self.__action(name)},
+            # /oyunfor 是 /oyunfor_buy 的简写，走同一个动作
+            "data": {"action": self.__action(name or "buy")},
         } for name, desc in commands]
 
     # ------------------------------------------------------------------ 机器人选面额
@@ -890,7 +892,7 @@ class OyunforGiftCard(_PluginBase):
         rows.append([{"text": "❌ 不买了", "callback_data": f"[PLUGIN]{plugin_id}|nobuy"}])
         lines = [f"付款方式：{PAY_MODE_SHORT[self._pay_mode]}" + (f"；单笔上限 {self._max_total:g} TL" if self._max_total else ""),
                  "点面额后会再确认一次，确认了才开始买。",
-                 f"其他面额（100~2000 的整数）直接发：{self._cmd('buy')} 375 1（面额 数量）"]
+                 f"也可以直接发：{self._cmd('')} 250（买 1 张）、{self._cmd('')} 375 2（任意 100~2000 的面额 × 2 张）"]
         if self._dry_run:
             lines.append("⚠️ 现在开着「演练模式」：只会走到付款前一步，不扣款")
         self.send(reply, "【Oyunfor 选择面额】", "\n".join(lines), buttons=rows, force=True, save_history=False)
@@ -966,7 +968,7 @@ class OyunforGiftCard(_PluginBase):
                 return
             amount, url, quantity, force_dry, error = self.parse_buy_args(arg_str)
             if error:
-                self.send(reply, "【Oyunfor】", f"{error}\n用法：{self._cmd('buy')} [面额|商品链接] [数量] [dry]", force=True)
+                self.send(reply, "【Oyunfor】", f"{error}\n用法：{self._cmd('')} [面额] [数量] [dry]，如 {self._cmd('')} 250 1；只发 {self._cmd('')} 会弹出面额按钮", force=True)
                 return
             ok, message = self.start_purchase(amount=amount, product_url=url, quantity=quantity, reply=reply,
                                               trigger="命令", force_dry=force_dry)
@@ -1298,7 +1300,7 @@ class OyunforGiftCard(_PluginBase):
         if not history:
             blocks.append({"component": "VAlert", "props": {
                 "type": "info", "variant": "tonal",
-                "text": f"暂无记录。先保持「演练模式」，打开「立即购买一次」保存，或在消息渠道发送 {self._cmd('buy')}。"}})
+                "text": f"暂无记录。先保持「演练模式」，打开「立即购买一次」保存，或在消息渠道发送 {self._cmd('')}（弹出面额按钮）。"}})
             return blocks
         rows = []
         for item in history[:80]:

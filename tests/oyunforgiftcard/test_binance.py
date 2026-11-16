@@ -152,3 +152,17 @@ def test_binance_qr_selector_override(oyun, site):
     assert oyun._job.qr_path and oyun._job.qr_path.exists()
     oyun.cancel_job()
     assert wait_idle(oyun, 60)
+
+
+def test_binance_single_message_waits_for_qr(oyun, site):
+    """真实币安收银台链接先出来、二维码过几秒才画好：只推一条消息，而且带二维码图片"""
+    site.set(binance_mode="hosted", binance_qr_delay="3000")
+    _binance(oyun)
+    prompt = _start_and_get_prompt(oyun)
+    time.sleep(2)
+    prompts = [m for m in oyun.messages if "请用币安付款" in (m.get("title") or "")]
+    assert len(prompts) == 1, [m.get("title") for m in oyun.messages]
+    assert prompt.get("image"), prompt
+    site.binance_pay(1001)
+    assert wait_idle(oyun, 90)
+    assert oyun.get_data("history")[-1]["code"] == "success"
