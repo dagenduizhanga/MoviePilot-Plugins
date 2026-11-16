@@ -67,6 +67,9 @@ def _default_state():
         "binance_mode": "onsite",      # onsite / hosted
         "binance_autoredirect": True,
         "binance_paid": [],
+        "add_redirect_ms": 0,           # ajax 列表：加入购物车成功后过多少毫秒网站自己跳到购物车（真实站点约 1 秒；0 = 不跳）
+        "gateway_delay": 0,             # PayTR 2026 页面：已保存的卡过多少毫秒才画出来（真实约 9 秒）
+        "slow_font": 0,                 # 每个页面都引用一个要下载这么多秒的网页字体（截图会等字体）
         "binance_qr_delay": 0,          # 币安收银台的二维码晚多少毫秒才出现（真实页面链接先出、二维码后画）
         "saved_card": False,
         "gateway_style": "classic",     # classic / paytr2026（真实 PayTR 新页面：Tailwind class、Radix 单选、type=button 付款按钮）
@@ -155,6 +158,9 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             balance = STATE["balance"]
             cart_n = len(STATE["cart"])
+            slow_font = STATE["slow_font"]
+        font_css = ("@font-face{font-family:SlowFont;src:url(/static/slow.woff2) format('woff2')} "
+                    "body{font-family:SlowFont,sans-serif !important} ") if slow_font else ""
         if logged:
             nav = (f'<a href="/hesabim">Hesabım</a> <a href="/hesabim/siparislerim">Siparişlerim</a> '
                    f'<span class="user-balance">Bakiye: {money(balance)} ₺</span> <a href="/bakiye-yukle">Bakiye Yükle</a> '
@@ -162,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             nav = '<a href="/giris">Giriş Yap</a> <a href="/kayit">Üye Ol</a>'
         return f"""<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>{html.escape(title)} - Oyunfor</title>
-<style>body{{font-family:sans-serif;margin:0}} header,main,footer{{padding:12px}} .hidden{{display:none}}
+<style>{font_css}body{{font-family:sans-serif;margin:0}} header,main,footer{{padding:12px}} .hidden{{display:none}}
 [role=dialog]{{position:fixed;top:30%;left:30%;background:#fff;border:2px solid #333;padding:20px}}</style></head>
 <body><header><a href="/">Oyunfor</a> <a href="{CATEGORY}">App Store</a> <a href="/mocanetwork/yemeksepeti">Yemeksepeti x Oyunfor</a> {nav} {self.header_cart(cart_n)}</header>
 <main>{body}</main>
@@ -223,6 +229,11 @@ class Handler(BaseHTTPRequestHandler):
             order = int(query.get("order", "0"))
             return self.send_html(self.page("Kart ile Ödeme", f"""<h1>Kart ile Ödeme</h1>
 <p>Sipariş #{order}</p><iframe id="paytr" src="{self.gateway}/paytr/form?order={order}" style="width:700px;height:520px;border:1px solid #ccc"></iframe>"""))
+        if path == "/static/slow.woff2":
+            with LOCK:
+                seconds = STATE["slow_font"]
+            time.sleep(seconds)
+            return self.send_html("", status=404)
         if path == "/static/apple-card.svg":
             return self.send_svg('<svg xmlns="http://www.w3.org/2000/svg" width="110" height="72"><rect width="110" height="72" rx="6" fill="#1e90ff"/></svg>')
         if path == "/static/binance-logo.svg":
@@ -451,6 +462,8 @@ class Handler(BaseHTTPRequestHandler):
         """商品列表由脚本在页面加载后渲染；加入购物车是 div 做的按钮（带图标字体字符），用 fetch 提交"""
         items = [{"key": key, "name": p["listing"], "price": p["price"], "slug": p["slug"]} for key, p in PRODUCTS.items()]
         data = json.dumps(items, ensure_ascii=False)
+        with LOCK:
+            redirect_ms, cart_path = int(STATE["add_redirect_ms"]), STATE["cart_path"]
         script = """
 <script>
 const ITEMS = %s;
@@ -460,6 +473,7 @@ function addToCart(key, el) {
   const t = card.querySelector('input[name=tutar]'); if (t) { body.set('tutar', t.value); body.set('kurus', card.querySelector('input[name=kurus]').value || '0'); }
   fetch('/sepet/ekle', {method: 'POST', body}).then(r => r.json()).then(() => {
     const toast = document.getElementById('toast'); toast.textContent = 'Ürün sepete eklendi'; toast.style.display = 'block';
+    if (REDIRECT_MS > 0) setTimeout(() => { window.location.href = CART_PATH; }, REDIRECT_MS);
   });
 }
 setTimeout(() => {
@@ -471,6 +485,7 @@ setTimeout(() => {
     `<div class="btn btn-success" onclick="addToCart('${it.key}', this)"><i class="fa fa-cart">\uf07a</i> <span>SEPETE EKLE</span></div></div></div>`).join('');
 }, 1200);
 </script>""" % data
+        script = script.replace("<script>", f"<script>\nconst REDIRECT_MS = {redirect_ms}; const CART_PATH = {json.dumps(cart_path)};", 1)
         return self.page("Apple Store", f"<h1>App Store Card</h1><div id='toast' style='display:none'></div><div id='list'>Yükleniyor...</div>{script}")
 
     def cart_page(self):
@@ -636,7 +651,9 @@ document.querySelector('.paymentSender').addEventListener('click', () => {
             total = STATE["orders"].get(order, {}).get("total", 0)
             style = STATE["gateway_style"]
         if style == "paytr2026" and saved:
-            return self.paytr2026_form(order, total, error)
+            with LOCK:
+                delay = int(STATE["gateway_delay"])
+            return self.paytr2026_form(order, total, error, delay)
         months ="".join(f'<option value="{m:02d}">{m:02d}</option>' for m in range(1, 13))
         years = "".join(f'<option value="{y}">{y}</option>' for y in range(2026, 2036))
         saved_html = ""
@@ -663,7 +680,7 @@ document.getElementById('card_number').addEventListener('input', e => {{
 </script></body></html>"""
 
     @staticmethod
-    def paytr2026_form(order, total, error=""):
+    def paytr2026_form(order, total, error="", delay=0):
         """仿 2026 年 PayTR「Güvenli Ödeme Sayfası」：已保存卡是 label 包着 Radix 单选 button[role=radio]；
         付款按钮是 type=button，class 里带 Tailwind 的「disabled:…」样式（按钮本身并没有禁用）"""
         radio_cls = ("aspect-square h-6 w-6 border-2 rounded-full focus:outline-none "
@@ -680,14 +697,18 @@ document.getElementById('card_number').addEventListener('input', e => {{
 <button type="button" class="flex items-center justify-between bg-white">TÜRKÇE</button>
 <div>Kart ile Ödeme</div><div>Diğer Ödeme Yöntemleri</div><div>Kayıtlı Kartlarım</div><div>Yeni Kartla Ödeme</div>{err}
 <form method="post" action="/paytr/pay" id="pay-form"><input type="hidden" name="order" value="{order}"><input type="hidden" name="saved" value="">
-{cards}<div>Ödemeniz Gereken Tutar {money(total * 1.025)} TL</div>
+<div id="cards"></div><template id="cards-tpl">{cards}</template><div>Ödemeniz Gereken Tutar {money(total * 1.025)} TL</div>
 <button type="button" class="{pay_cls}" id="pay">Ödeme Yap</button></form>
 <script>
-document.querySelectorAll('[role=radio]').forEach(r => r.addEventListener('click', () => {{
-  document.querySelectorAll('[role=radio]').forEach(x => {{ x.setAttribute('aria-checked', 'false'); x.dataset.state = 'unchecked'; }});
-  r.setAttribute('aria-checked', 'true'); r.dataset.state = 'checked';
-  document.querySelector('[name=saved]').value = r.value;
-}}));
+// 真实 PayTR 页面是脚本渲染的：已保存的卡要过一会儿才出现
+setTimeout(() => {{
+  document.getElementById('cards').innerHTML = document.getElementById('cards-tpl').innerHTML;
+  document.querySelectorAll('#cards [role=radio]').forEach(r => r.addEventListener('click', () => {{
+    document.querySelectorAll('#cards [role=radio]').forEach(x => {{ x.setAttribute('aria-checked', 'false'); x.dataset.state = 'unchecked'; }});
+    r.setAttribute('aria-checked', 'true'); r.dataset.state = 'checked';
+    document.querySelector('[name=saved]').value = r.value;
+  }}));
+}}, {delay});
 document.getElementById('pay').addEventListener('click', () => {{
   if (!document.querySelector('[name=saved]').value) {{ alert('Lütfen bir kart seçin'); return; }}
   document.getElementById('pay-form').submit();
@@ -900,7 +921,7 @@ setInterval(async () => {{ const r = await fetch('/binance/status?order={order}'
                         STATE[key] = value in ("1", "true", "yes")
                     elif key == "cart":
                         STATE["cart"] = [{"product": p, "qty": 1} for p in value.split(",") if p]
-                    elif key in ("cf_error_left", "binance_qr_delay"):
+                    elif key in ("cf_error_left", "binance_qr_delay", "add_redirect_ms", "gateway_delay", "slow_font"):
                         STATE[key] = int(value)
                     else:
                         STATE[key] = value

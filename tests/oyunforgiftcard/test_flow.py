@@ -4,6 +4,7 @@
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -740,7 +741,7 @@ def test_bot_pick_confirm_then_dry_run(oyun, site):
 
 def test_bot_expired_or_bad_buy_button_does_not_buy(oyun, site):
     oyun.handle_button(_button("buy:100:1:1"))          # 1970 年的时间戳 = 过期
-    assert oyun._job is None and "过期" in oyun.messages[-2]["text"]
+    assert oyun._job is None and "过期" in oyun.messages[-1]["text"]
     assert "选择面额" in oyun.messages[-1]["title"]
     oyun.handle_button(_button("buy:100:1"))            # 没有时间戳
     assert oyun._job is None
@@ -757,3 +758,52 @@ def test_verification_message_hides_card(oyun):
     text = oyun.messages[-1]["text"]
     assert "OKX" not in text and "533171" not in text and "1307" not in text
     assert "102.50" in text
+
+
+def test_bot_buttons_update_the_same_message(oyun, site):
+    """点按钮时 MoviePilot 会带上原消息 ID：菜单 → 确认 → 开始 都在同一条消息上原地更新，结果消息才新发"""
+    oyun.init_plugin(make_config(dry_run=True, notify=False))
+    origin = {"source": "tg1", "original_message_id": 555, "original_chat_id": 42}
+
+    def edited(message):
+        return (message.get("original_message_id") == 555 and message.get("original_chat_id") == "42"
+                and bool(message.get("buttons")))
+
+    oyun.handle_button(_button("pick:100:1", **origin))
+    confirm = oyun.messages[-1]
+    assert "确认购买" in confirm["title"] and edited(confirm)
+    oyun.handle_button(_button("menu", **origin))
+    assert "选择面额" in oyun.messages[-1]["title"] and edited(oyun.messages[-1])
+    oyun.handle_button(_button("nobuy", **origin))
+    assert "不买了" in oyun.messages[-1]["text"] and edited(oyun.messages[-1])
+    go = [c for c in _callbacks(confirm) if c.startswith("dry:100:1:")][0]
+    oyun.handle_button(_button(go, **origin))
+    assert wait_idle(oyun, 120)
+    start = [m for m in oyun.messages if "开始" in m["title"]][-1]
+    assert edited(start) and _callbacks(start) == ["cancel"]
+    later = oyun.messages[oyun.messages.index(start) + 1:]
+    assert later and all("original_message_id" not in m for m in later)
+    assert oyun.get_data("history")[-1]["code"] == "dry_run"
+
+
+def test_slow_paytr_page_in_fast_mode(oyun, site):
+    """PayTR 页面过几秒才把已保存的卡画出来：等它（按真实时间），不能因为停顿被缩短就判「没有找到已保存的卡」"""
+    site.set(saved_card="1", acs_mode="none", gateway_style="paytr2026", gateway_delay="4000",
+             cart_button="oyunfor", cart_path="/sepetim", header_cart="icon", balance="0")
+    oyun.init_plugin(make_config(pay_mode="card"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert site.posts("/paytr/pay")[-1]["data"].get("saved") == "tok_4242"
+
+
+def test_site_redirects_to_cart_after_add_and_slow_fonts(oyun, site):
+    """加入购物车后网站自己 1 秒后跳到购物车（不抢着跳，不报 ERR_ABORTED）；网页字体下不完时截图不卡住"""
+    site.set(listing_style="ajax", add_redirect_ms="1000", cart_path="/sepetim", header_cart="icon",
+             cart_button="oyunfor", slow_font="20")
+    began = time.time()
+    record = run(oyun)
+    assert record["code"] == "success", record
+    run_dir = oyun.get_data_path() / "runs" / record["run"]
+    steps = oyun._read_run_file(run_dir / "steps.log.enc").decode("utf-8")
+    assert "截图失败" not in steps and "ERR_ABORTED" not in steps, steps
+    assert time.time() - began < 100

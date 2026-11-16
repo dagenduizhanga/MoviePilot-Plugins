@@ -752,6 +752,13 @@ CF_ERROR_RETRY_WAITS = (5, 15, 30)
 # 点击后等「网络空闲」、打开页面后等「全部加载完」的上限（秒）
 SETTLE_IDLE_MAX = 3.0
 PAGE_LOAD_MAX = 6.0
+# 等页面上的东西出现的时限（秒，按真实时间算，不受「快速模式」影响 —— 快速模式只缩短点击之间的停顿）
+GATEWAY_WAIT = 45.0        # 点「进入支付页」后，等 PayTR 页面上出现已保存的卡 / 卡表单
+TOPUP_BUTTON_WAIT = 20.0   # 补差额页选了付款方式后，等付款渠道和「Ödeme Yap」按钮
+ADD_REDIRECT_WAIT = 10.0   # 点「加入购物车」后，等网站自己跳到购物车
+# 平常步骤的截图最多等几秒；连续失败这么多次，本次运行后面的平常截图就跳过（出错时的截图不受影响）
+ROUTINE_SNAP_TIMEOUT = 4.0
+ROUTINE_SNAP_MAX_FAILS = 2
 # 币安付款页：链接出来后最多再等几秒二维码，再推送（只推一条带二维码的消息）
 BINANCE_QR_GRACE = 8.0
 # 这些步骤的截图存整页 + 页面源码（出错、停下、演练结束时排查用）；其余步骤只截可见区域、不存源码，省时间
@@ -864,6 +871,8 @@ class StepRecorder:
         self.steps: List[str] = []
         self.lines: List[str] = []
         self.last_screenshot: Optional[Path] = None
+        # 平常步骤截图连续失败的次数
+        self.snap_fails = 0
         if directory:
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -891,11 +900,16 @@ class StepRecorder:
              full_page: bool = True) -> Optional[Path]:
         if not self.directory or page is None:
             return None
+        routine = not full_page
+        if routine and self.snap_fails >= ROUTINE_SNAP_MAX_FAILS:
+            # 平常步骤的截图连续失败：后面的不再试，免得每步白等几秒（出错 / 停下时的整页截图照常）
+            return None
         self.index += 1
         stem = f"{self.index:02d}-{re.sub(r'[^a-zA-Z0-9_-]+', '_', name)[:40]}"
         shot = None
         try:
-            kwargs: Dict[str, Any] = {"type": "jpeg", "quality": 60, "full_page": full_page, "timeout": 15000}
+            kwargs: Dict[str, Any] = {"type": "jpeg", "quality": 60, "full_page": full_page,
+                                      "timeout": int(ROUTINE_SNAP_TIMEOUT * 1000) if routine else 15000}
             # 兑换码在截图里也遮住（文件本身已加密，这是第二道保险）
             masks = list(mask or [])
             try:
@@ -908,8 +922,14 @@ class StepRecorder:
                 kwargs["mask"] = masks
             shot = self.write(f"{stem}.jpg", page.screenshot(**kwargs))
             self.last_screenshot = shot
+            if routine:
+                self.snap_fails = 0
         except Exception as err:
             self.log(f"截图失败（{name}）：{str(err)[:120]}")
+            if routine:
+                self.snap_fails += 1
+                if self.snap_fails >= ROUTINE_SNAP_MAX_FAILS:
+                    self.log("截图连续失败，本次运行后面的步骤截图跳过（出错时仍会截图），不影响购买")
         if html:
             try:
                 frames = [frame.url for frame in page.frames]
@@ -953,6 +973,8 @@ class OyunforShop:
         self.overrides = overrides or {}
         self.nav_timeout = nav_timeout
         self.pause_scale = pause_scale
+        # 等待元素出现的时限倍数：正常是 1（真实秒数）；只有停顿被完全关掉时（测试）才缩短
+        self.wait_scale = 1.0 if pause_scale > 0 else 0.2
         # 填过卡信息的 frame 与输入框（截图时遮挡）
         self.card_frame: Any = None
         self.card_masks: List[Any] = []
@@ -978,6 +1000,20 @@ class OyunforShop:
         # 平常的步骤只截可见区域、不存源码；出错 / 停下 / 演练结束才存整页和源码
         detail = bool(DETAIL_SNAP_RE.match(name))
         return self.recorder.snap(self.page, name, html=html and detail, mask=live or None, full_page=detail)
+
+    def wait_until(self, check: Callable[[], Any], timeout: float, interval: float = 0.4) -> Any:
+        """轮询等 check() 返回真值，最多 timeout 秒（真实时间，不受快速模式影响）；超时返回 None"""
+        deadline = time.time() + timeout * self.wait_scale
+        while True:
+            value = check()
+            if value:
+                return value
+            if time.time() >= deadline:
+                return None
+            try:
+                self.page.wait_for_timeout(int(interval * 1000))
+            except Exception:  # noqa
+                time.sleep(interval)
 
     def pause(self, low: float = 0.6, high: float = 1.4):
         seconds = random.uniform(low, high) * self.pause_scale
@@ -1314,7 +1350,7 @@ class OyunforShop:
 
     def wait_products(self, timeout: float = 15.0) -> List[Dict[str, Any]]:
         """商品列表可能是脚本加载 / 滚动懒加载的：等卡片出现、数量稳定"""
-        deadline = time.time() + timeout * max(self.pause_scale, 0.2)
+        deadline = time.time() + timeout * self.wait_scale
         cards = self.product_cards()
         last = -1
         while time.time() < deadline:
@@ -1680,6 +1716,14 @@ class OyunforShop:
                 self.snap("product-no-button")
                 raise FlowError("failed", "没有认出商品卡片，也没找到「Hemen Al / Sepete Ekle」按钮。" + self.page_summary())
         self.settle()
+        # Oyunfor 加入购物车成功后会自己跳到 /sepetim（提示框显示约 1 秒后）：等它跳，
+        # 不要抢着自己去打开购物车（两次跳转撞在一起会报 ERR_ABORTED，还多加载一遍）
+        if self.wait_until(lambda: bool(CART_PATH_RE.search(urlparse(self.page.url).path))
+                           or self._looks_like_checkout()
+                           or self.find("checkout", maxLen=40, scope=DIALOG_SCOPE)
+                           or self.find("go_cart", maxLen=40, scope=DIALOG_SCOPE, exclude=[r"ekle"]),
+                           ADD_REDIRECT_WAIT):
+            self.settle()
         self.pause(1.0, 2.0)
         if not self._looks_like_checkout() and not self._looks_like_cart():
             # 还停在商品页 / 列表页：可能弹出了「已加入购物车」对话框或侧边小购物车
@@ -1725,6 +1769,8 @@ class OyunforShop:
                 match = TOPUP_PATH_RE.search(self.page.url or "")
                 if match:
                     self.note(f"进入补差额付款页，需要付 {int(match.group(1))}.{match.group(2)[:2].ljust(2, '0')} TL")
+                    # 付款方式方块可能晚一点才出来：等它，不要只看一眼就判定「没有进入结算页」
+                    self.wait_until(self._looks_like_checkout, TOPUP_BUTTON_WAIT)
                 continue
             found = self.find("checkout", maxLen=40, exclude=[r"alisverise devam", r"continue shopping"])
             if not found:
@@ -1754,19 +1800,17 @@ class OyunforShop:
 
     def _topup_send_button(self) -> Optional[Dict[str, Any]]:
         """补差额付款页：选了付款方式后选付款渠道（一般只有一个，如 PayTR），返回「Ödeme Yap」按钮"""
-        picked = False
-        for _ in range(12):
-            provider = None if picked else self._visible_marked(OYUNFOR_PROVIDER)
+        state = {"picked": False}
+
+        def check() -> Optional[Dict[str, Any]]:
+            provider = None if state["picked"] else self._visible_marked(OYUNFOR_PROVIDER)
             if provider:
                 self.click(provider, what="付款渠道")
-                picked = True
+                state["picked"] = True
                 self.settle(5)
-                self.pause(0.5, 0.9)
-            button = self._visible_marked(OYUNFOR_SEND_BUTTON)
-            if button:
-                return button
-            self.pause(0.5, 0.9)
-        return None
+            return self._visible_marked(OYUNFOR_SEND_BUTTON)
+
+        return self.wait_until(check, TOPUP_BUTTON_WAIT)
 
     def _looks_like_cart(self) -> bool:
         if not self._page_ok():
@@ -2683,15 +2727,20 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
                 shop.snap("before-gateway")
                 shop.click(button, frame=frame, what=f"进入支付页（{button.get('text')}）")
                 shop.settle(15)
-                for _ in range(20):
-                    # Oyunfor 补差额页的「Ödeme Yap」在新标签页打开 PayTR，标签页可能稍后才出现
+
+                def gateway_ready() -> bool:
+                    # Oyunfor 补差额页的「Ödeme Yap」在新标签页打开 PayTR，标签页可能稍后才出现；
+                    # PayTR 页面自己还要几秒才把已保存的卡画出来（实测约 9 秒）
                     shop.adopt_new_page()
                     if shop.card_form_visible() or shop.saved_card_option(last4)[1]:
-                        break
+                        return True
                     if shop._verify_frame_state():
                         raise FlowError("unknown", "进入支付页后直接出现了银行验证（可能自动使用了已保存的卡），"
                                                    "插件已停止，请不要在银行 App 中确认这笔交易", paid=True)
-                    shop.pause(0.8, 1.2)
+                    return False
+
+                if not shop.wait_until(gateway_ready, GATEWAY_WAIT, interval=0.5):
+                    shop.note(f"等了 {GATEWAY_WAIT * shop.wait_scale:.0f} 秒，支付页上还没有出现银行卡表单或已保存的卡")
                 shop.tick_agreements()
             shop.snap("gateway")
             if not shop.card_form_visible() and not shop.saved_card_option(last4)[1]:

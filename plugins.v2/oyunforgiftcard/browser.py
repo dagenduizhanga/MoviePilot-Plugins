@@ -9,6 +9,11 @@ from urllib.parse import urlparse
 # 测试或自定义部署时可指定 Chromium 可执行文件
 EXECUTABLE_ENV = "OYUNFOR_BROWSER_EXECUTABLE"
 
+# Playwright 截图前默认会等页面的网页字体全部下载完：网络慢时字体迟迟下不完，截图就一直等到超时（每次白等十几秒）。
+# 这个环境变量让它不等字体直接截（要在浏览器驱动启动前设置；对截图内容没有别的影响）
+NO_FONT_WAIT_ENV = "PW_TEST_SCREENSHOT_NO_FONTS_READY"
+os.environ.setdefault(NO_FONT_WAIT_ENV, "1")
+
 
 def playwright_proxy(address: Optional[str]) -> Optional[Dict[str, str]]:
     """把 http://user:pass@host:port 转换为 Playwright 的代理配置"""
@@ -34,6 +39,7 @@ def launch_browser(headless: bool = False, proxy: Optional[Dict[str, str]] = Non
     启动浏览器上下文
     :return: (context, 关闭函数, 引擎说明)
     """
+    os.environ.setdefault(NO_FONT_WAIT_ENV, "1")
     context_kwargs: Dict[str, Any] = {"viewport": {"width": 1366, "height": 900}}
     if isinstance(storage_state, dict):
         # 解密后的登录状态直接以内存对象传入，不落明文文件

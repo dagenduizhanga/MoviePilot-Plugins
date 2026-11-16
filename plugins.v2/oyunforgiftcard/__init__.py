@@ -159,7 +159,7 @@ class OyunforGiftCard(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png"
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     # 插件作者
     plugin_author = "dagenduizhanga"
     # 作者主页
@@ -434,14 +434,24 @@ class OyunforGiftCard(_PluginBase):
 
     # ------------------------------------------------------------------ 消息
     def send(self, reply: Optional[dict], title: str, text: str = "", buttons: Optional[list] = None,
-             force: bool = False, image: Optional[str] = None, save_history: bool = True):
-        """发送消息：有回复目标时只回给触发者，否则按通知开关广播"""
+             force: bool = False, image: Optional[str] = None, save_history: bool = True,
+             edit: Optional[dict] = None):
+        """
+        发送消息：有回复目标时只回给触发者，否则按通知开关广播。
+        :param edit: 点按钮触发时传入原消息（message_id / chat_id / source）：新消息带按钮时，
+                     MoviePilot 会直接把原消息改成新内容，而不是再发一条
+        """
         reply = reply or {}
         if not force and not reply.get("channel") and not reply.get("userid") and not self._notify:
             return
         kwargs: Dict[str, Any] = {}
         if buttons:
             kwargs["buttons"] = buttons
+            if edit and edit.get("message_id") and edit.get("chat_id"):
+                kwargs["original_message_id"] = edit["message_id"]
+                kwargs["original_chat_id"] = str(edit["chat_id"])
+                if edit.get("source"):
+                    kwargs["source"] = edit["source"]
         if image:
             kwargs["image"] = image
         if not save_history:
@@ -700,7 +710,11 @@ class OyunforGiftCard(_PluginBase):
                       else request.product_url or f"{request.amount} TL")
             recorder.note(f"开始{what}（{job.trigger}）：{target} × {request.quantity}，付款方式 {request.pay_mode}")
             if self._has_target(job.reply):
-                self.send(job.reply, f"【Oyunfor 开始{what}】", f"{target} × {request.quantity}")
+                # 按钮触发：把确认消息原地改成「开始」，只用这一次，之后的验证 / 结果消息照常新发
+                edit = job.reply.pop("edit", None)
+                cancel = [[{"text": "❌ 取消购买", "callback_data": f"[PLUGIN]{self.__class__.__name__}|cancel"}]]
+                self.send(job.reply, f"【Oyunfor 开始{what}】", f"{target} × {request.quantity}",
+                          buttons=cancel if edit else None, edit=edit)
             # 敏感信息只在这里解密，任务结束即丢弃
             creds = self.read_secrets()
             request.card = CardInfo(number=creds.get("card_number", ""), holder=creds.get("card_holder", ""),
@@ -883,8 +897,8 @@ class OyunforGiftCard(_PluginBase):
     def _menu_amounts(self) -> List[int]:
         return [a for a in MENU_AMOUNTS if not self._max_total or a <= self._max_total + 0.01]
 
-    def send_amount_menu(self, reply: Optional[dict]):
-        """/oyunfor_buy 不带参数：发面额按钮"""
+    def send_amount_menu(self, reply: Optional[dict], edit: Optional[dict] = None, notice: str = ""):
+        """/oyunfor 不带参数：发面额按钮（edit：直接改原消息）"""
         plugin_id = self.__class__.__name__
         amounts = self._menu_amounts()
         rows = [[{"text": f"{a} TL", "callback_data": f"[PLUGIN]{plugin_id}|pick:{a}:1"} for a in amounts[i:i + 4]]
@@ -895,9 +909,12 @@ class OyunforGiftCard(_PluginBase):
                  f"也可以直接发：{self._cmd('')} 250（买 1 张）、{self._cmd('')} 375 2（任意 100~2000 的面额 × 2 张）"]
         if self._dry_run:
             lines.append("⚠️ 现在开着「演练模式」：只会走到付款前一步，不扣款")
-        self.send(reply, "【Oyunfor 选择面额】", "\n".join(lines), buttons=rows, force=True, save_history=False)
+        if notice:
+            lines.insert(0, notice)
+        self.send(reply, "【Oyunfor 选择面额】", "\n".join(lines), buttons=rows, force=True, save_history=False,
+                  edit=edit)
 
-    def send_buy_confirm(self, reply: Optional[dict], amount: int, quantity: int):
+    def send_buy_confirm(self, reply: Optional[dict], amount: int, quantity: int, edit: Optional[dict] = None):
         """选了面额：再确认一次（可改数量、只演练）"""
         plugin_id = self.__class__.__name__
         stamp = format(int(time.time()), "x")
@@ -920,15 +937,21 @@ class OyunforGiftCard(_PluginBase):
             lines.append(f"⚠️ 超过单笔上限 {self._max_total:g} TL，会被拦下，请减少数量")
         if self._dry_run:
             lines.append("⚠️ 现在开着「演练模式」：只会走到付款前一步，不扣款。要真买请先在插件设置里关掉")
-        self.send(reply, "【Oyunfor 确认购买】", "\n".join(lines), buttons=rows, force=True, save_history=False)
+        self.send(reply, "【Oyunfor 确认购买】", "\n".join(lines), buttons=rows, force=True, save_history=False,
+                  edit=edit)
 
-    def handle_buy_button(self, reply: dict, text: str) -> bool:
-        """处理选面额 / 确认购买按钮；不是这类按钮返回 False"""
+    def handle_buy_button(self, reply: dict, text: str, edit: Optional[dict] = None) -> bool:
+        """
+        处理选面额 / 确认购买按钮；不是这类按钮返回 False。
+        :param edit: 被点的那条消息：菜单 → 确认 → 开始 都在这一条消息上原地更新，不再一条条新发
+        """
+        plugin_id = self.__class__.__name__
         if text == "menu":
-            self.send_amount_menu(reply)
+            self.send_amount_menu(reply, edit=edit)
             return True
         if text == "nobuy":
-            self.send(reply, "【Oyunfor】", "好的，不买了", force=True, save_history=False)
+            again = [[{"text": "🔄 重新选面额", "callback_data": f"[PLUGIN]{plugin_id}|menu"}]]
+            self.send(reply, "【Oyunfor】", "好的，不买了", buttons=again, force=True, save_history=False, edit=edit)
             return True
         match = re.fullmatch(r"(pick|buy|dry):(\d{2,5}):(\d{1,2})(?::([0-9a-f]+))?", text)
         if not match:
@@ -938,16 +961,18 @@ class OyunforGiftCard(_PluginBase):
             self.send(reply, "【Oyunfor】", "面额应在 100~2000 TL，数量 1~10", force=True)
             return True
         if action == "pick":
-            self.send_buy_confirm(reply, amount, quantity)
+            self.send_buy_confirm(reply, amount, quantity, edit=edit)
             return True
         if not stamp or time.time() - int(stamp, 16) > BUY_BUTTON_TTL:
-            self.send(reply, "【Oyunfor】", "这个按钮已过期，请重新选择面额", force=True, save_history=False)
-            self.send_amount_menu(reply)
+            self.send_amount_menu(reply, edit=edit, notice="⌛ 刚才的按钮已过期，请重新选择面额")
             return True
-        ok, message = self.start_purchase(amount=amount, quantity=quantity, reply=reply, trigger="按钮",
+        # 「开始购买」也改在这条消息上（带一个取消按钮），确认按钮随之消失，不会被重复点
+        start_reply = dict(reply, edit=edit) if edit else reply
+        ok, message = self.start_purchase(amount=amount, quantity=quantity, reply=start_reply, trigger="按钮",
                                           force_dry=action == "dry")
         if not ok:
-            self.send(reply, "【Oyunfor】", message, force=True)
+            again = [[{"text": "🔄 重新选面额", "callback_data": f"[PLUGIN]{plugin_id}|menu"}]]
+            self.send(reply, "【Oyunfor】", message, buttons=again, force=True, edit=edit)
         return True
 
     @eventmanager.register(EventType.PluginAction)
@@ -1001,7 +1026,9 @@ class OyunforGiftCard(_PluginBase):
         elif text == "cancel":
             ok, message = self.cancel_job()
         else:
-            self.handle_buy_button(reply, text)
+            edit = {"message_id": data.get("original_message_id"), "chat_id": data.get("original_chat_id"),
+                    "source": data.get("source")}
+            self.handle_buy_button(reply, text, edit=edit if edit["message_id"] and edit["chat_id"] else None)
             return
         self.send(reply, "【Oyunfor 验证】", message, force=True)
 

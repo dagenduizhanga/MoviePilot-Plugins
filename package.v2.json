@@ -15,11 +15,12 @@
     "name": "Oyunfor 礼品卡购买",
     "description": "在 oyunfor.com 自动购买 App Store 礼品卡（TL）：余额 / 币安 / 银行卡付款，验证推送给你；敏感信息全部加密。",
     "labels": "Oyunfor,App Store,礼品卡,币安",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "icon": "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png",
     "author": "dagenduizhanga",
     "level": 1,
     "history": {
+      "v1.1.1": "修复快速模式下银行卡付款报「没有找到银行卡表单或已保存的卡」：等页面内容出现改为按真实时间等（PayTR 最多 45 秒），快速模式只缩短点击之间的停顿；修复截图卡 15 秒（页面字体没下完时截图不再等字体，平常截图最多等 4 秒、连续失败就跳过）；加入购物车后等网站自己跳到购物车，不再报 ERR_ABORTED；机器人里点面额 / 数量 / 购买时在同一条消息上原地更新，不再一条条新发",
       "v1.1.0": "首版之后的大更新：余额 / 银行卡（PayTR）/ 币安付款都已跑通。机器人里发 /oyunfor 弹出面额按钮、确认后才买，/oyunfor 250 直接买；余额不够时自动走 Oyunfor 补差额付款页；演练绝不点会直接下单的「Alışverişi Tamamla」；Cloudflare 520 等网站错误自动重试；快速模式（默认开）与更短的等待、只在出错时存整页截图，购买更快；币安付款只推一条带二维码的消息；商品链接默认 App Store 分类页；付款验证提醒不再暴露卡的信息；敏感信息全部加密",
       "v1.0.0": "首个版本：浏览器自动下单（余额 / 银行卡），3DS 验证码与 App 确认通过消息、按钮、网页或 API 转发；默认演练模式；单笔金额与每日次数限制；兑换码自动提取；每步截图与诊断包"
     }
