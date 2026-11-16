@@ -96,6 +96,7 @@ OYUNFOR_SEND_BUTTON = "button.paymentSender"
 # 购物车地址：按路径段精确匹配（避免把 /mocanetwork/yemeksepeti 这类当成购物车）
 CART_PATH_RE = re.compile(r"(^|/)(sepet|sepetim|sepetiniz|alisveris-sepeti|cart|basket|shopping-cart)(/|$|\.)", re.I)
 CART_PATHS = ("/sepet", "/sepetim", "/sepet.html", "/alisveris-sepeti", "/cart")
+OYUNFOR_CART_PATH = "/sepetim"
 SUCCESS_TEXT = [
     r"siparis(iniz)? (basariyla )?(alindi|olusturuldu|tamamlandi|onaylandi)",
     r"odeme(niz)? (basariyla )?(alindi|tamamlandi|basarili)", r"odeme islemi(niz)? basari",
@@ -241,6 +242,17 @@ def mask_code(code: str) -> str:
     if len(code) <= 8:
         return code[:2] + "*" * max(0, len(code) - 2)
     return f"{code[:4]}{'*' * (len(code) - 8)}{code[-4:]}"
+
+
+# 页面上的卡号片段（如 533171*****1307、**** **** **** 1307、4242 42** **** 4242）：前 6 位能看出发卡机构
+_CARD_RUN_RE = re.compile(r"(?<![\w*•])[\d*•]{2,}(?:[ -][\d*•]{2,})*(?![\w*•])")
+_CARD_FULL_RE = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
+
+
+def mask_card_text(text: Optional[str]) -> str:
+    """去掉文字里的卡号片段（发给聊天的页面摘要用）"""
+    masked = _CARD_RUN_RE.sub(lambda m: "****" if re.search(r"[*•]", m.group(0)) else m.group(0), text or "")
+    return _CARD_FULL_RE.sub("****", masked)
 
 
 def parse_cookie(cookie_str: Optional[str]) -> Dict[str, str]:
@@ -737,6 +749,9 @@ JS_CF_ERROR = r"""
 """
 # Cloudflare 5xx 错误页重试前等待的秒数
 CF_ERROR_RETRY_WAITS = (5, 15, 30)
+# 点击后等「网络空闲」、打开页面后等「全部加载完」的上限（秒）
+SETTLE_IDLE_MAX = 3.0
+PAGE_LOAD_MAX = 6.0
 
 
 # ---------------------------------------------------------------- 数据结构
@@ -1002,7 +1017,8 @@ class OyunforShop:
                 self.snap("challenge")
                 raise FlowError("blocked", reason)
             try:
-                self.page.wait_for_load_state("load", timeout=15000)
+                # 「load」要等所有图片加载完；页面结构在 DOMContentLoaded 时就有了，最多等 PAGE_LOAD_MAX 秒
+                self.page.wait_for_load_state("load", timeout=int(PAGE_LOAD_MAX * 1000))
             except Exception:  # noqa
                 pass
             code = self.cf_error_code()
@@ -1095,8 +1111,10 @@ class OyunforShop:
             self.page.wait_for_load_state("domcontentloaded", timeout=int(timeout * 1000))
         except Exception:  # noqa
             pass
+        # 「网络空闲」最多等 SETTLE_IDLE_MAX 秒：统计、在线客服之类的请求会让它一直等到超时，
+        # 后面的步骤本来就会轮询页面元素，不需要死等
         try:
-            self.page.wait_for_load_state("networkidle", timeout=int(timeout * 1000))
+            self.page.wait_for_load_state("networkidle", timeout=int(min(timeout, SETTLE_IDLE_MAX) * 1000))
         except Exception:  # noqa
             pass
         self.adopt_new_page()
@@ -1521,6 +1539,8 @@ class OyunforShop:
 
     def open_cart(self) -> bool:
         """打开购物车页，返回是否像购物车"""
+        if self._looks_like_cart():
+            return True
         cart = self.overrides.get("cart_url")
         if cart:
             self.goto(cart, "购物车")
@@ -2579,7 +2599,11 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
     result = PurchaseResult(status="failed", message="")
     paid = False
     try:
-        shop.goto("/", "首页")
+        # 要清空购物车时直接从购物车页开始（页头一样能看登录状态和余额），省掉打开首页这一步
+        if clear_cart:
+            shop.goto(shop.overrides.get("cart_url") or OYUNFOR_CART_PATH, "购物车")
+        else:
+            shop.goto("/", "首页")
         logged = shop.is_logged_in()
         shop.snap("home")
         if logged is False:

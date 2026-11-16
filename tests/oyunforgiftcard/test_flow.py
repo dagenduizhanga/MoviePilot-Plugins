@@ -695,3 +695,65 @@ def test_cloudflare_520_keeps_failing(oyun, site):
     assert "520" in record["message"] and "稍后再试" in record["message"], record
     assert "Web server" not in (record.get("product") or "")
     assert not site.posts("/sepet/ekle")
+
+
+# ---------------------------------------------------------------- 机器人选面额
+def _button(event_text, **extra):
+    data = {"plugin_id": "OyunforGiftCard", "text": event_text, "channel": "Telegram", "userid": "42"}
+    data.update(extra)
+    return Event(EventType.MessageAction, data)
+
+
+def _callbacks(message):
+    return [b.get("callback_data", "").split("|", 1)[-1] for row in message.get("buttons") or [] for b in row]
+
+
+def test_bot_buy_without_args_shows_amount_menu(oyun, site):
+    """/oyunfor_buy 不带参数：不直接买，发面额按钮（超过单笔上限的面额不显示）"""
+    oyun.init_plugin(make_config(max_total=1000))
+    oyun.handle_command(Event(EventType.PluginAction, {"action": "oyunforgiftcard_buy", "arg_str": "",
+                                                       "channel": "Telegram", "user": "42"}))
+    assert oyun._job is None
+    menu = oyun.messages[-1]
+    assert "选择面额" in menu["title"] and menu["userid"] == "42"
+    assert _callbacks(menu) == ["pick:100:1", "pick:250:1", "pick:500:1", "pick:1000:1", "nobuy"]
+
+
+def test_bot_pick_confirm_then_dry_run(oyun, site):
+    """点面额 → 确认消息（可改数量）→ 点「演练」才开始；演练模式下主按钮也是演练"""
+    oyun.init_plugin(make_config(dry_run=True, notify=False))
+    oyun.handle_button(_button("pick:100:2"))
+    assert oyun._job is None
+    confirm = oyun.messages[-1]
+    assert "确认购买" in confirm["title"] and "100 TL App Store 卡 × 2" in confirm["text"]
+    assert "演练模式" in confirm["text"]
+    go = [c for c in _callbacks(confirm) if c.startswith("dry:100:2:")]
+    assert go and not [c for c in _callbacks(confirm) if c.startswith("buy:")]
+    oyun.handle_button(_button("pick:100:1"))
+    go = [c for c in _callbacks(oyun.messages[-1]) if c.startswith("dry:100:1:")][0]
+    oyun.handle_button(_button(go))
+    assert wait_idle(oyun, 120)
+    record = oyun.get_data("history")[-1]
+    assert record["code"] == "dry_run" and record["face"] == 100 and record["trigger"] == "按钮", record
+    assert all(m.get("userid") == "42" for m in oyun.messages)
+
+
+def test_bot_expired_or_bad_buy_button_does_not_buy(oyun, site):
+    oyun.handle_button(_button("buy:100:1:1"))          # 1970 年的时间戳 = 过期
+    assert oyun._job is None and "过期" in oyun.messages[-2]["text"]
+    assert "选择面额" in oyun.messages[-1]["title"]
+    oyun.handle_button(_button("buy:100:1"))            # 没有时间戳
+    assert oyun._job is None
+    oyun.handle_button(_button("buy:5000:1:ffffffffff"))  # 面额超范围
+    assert oyun._job is None and "100~2000" in oyun.messages[-1]["text"]
+    assert not site.posts("/sepet/ekle")
+
+
+def test_verification_message_hides_card(oyun):
+    """验证提醒里不再写「如 OKX」，页面摘要里的卡号片段打码"""
+    from app.plugins.oyunforgiftcard import _Job
+    job = _Job("purchase", "命令", {"channel": "Telegram", "userid": "42"})
+    oyun.notify_verification(job, "otp", "mastercard identity check paytr try 102.50 533171*****1307 verify")
+    text = oyun.messages[-1]["text"]
+    assert "OKX" not in text and "533171" not in text and "1307" not in text
+    assert "102.50" in text

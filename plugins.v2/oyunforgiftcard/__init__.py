@@ -36,11 +36,20 @@ from app.schemas.types import EventType
 from .browser import add_cookies, launch_browser, playwright_proxy
 from .secure_page import (FIELDS, SECURITY_HEADERS, mask_value, render_error, render_form, render_result,
                           validate)
-from .shop import (BASE_URL, CardInfo, Interaction, OyunforShop, PurchaseRequest, PurchaseResult,
-                   StepRecorder, check_account, load_overrides, mask_code, parse_cookie, run_purchase)
+from .shop import (BASE_URL, CATEGORY_PATH, CardInfo, Interaction, OyunforShop, PurchaseRequest, PurchaseResult,
+                   StepRecorder, check_account, load_overrides, mask_card_text, mask_code, parse_cookie,
+                   run_purchase)
 from .vault import ENV_NAME, MIN_SECRET_LENGTH, Vault, VaultError, generate_secret
 
 BASE_PLUGIN_ID = "Oyunfor" + "GiftCard"
+# 默认商品链接：App Store 礼品卡分类页（按面额在里面挑），不用用户填写
+DEFAULT_PRODUCT_URL = BASE_URL + CATEGORY_PATH
+# 快速模式：点击之间「像人一样」的随机停顿缩短到这个比例
+FAST_PAUSE_SCALE = 0.3
+# 机器人里「选面额」按钮（Oyunfor App Store 分类页上的固定面额；其他 100~2000 的整数用命令买自定义面额卡）
+MENU_AMOUNTS = (100, 250, 500, 1000, 1250, 1500, 1750, 2000)
+# 确认购买的按钮多久后失效（秒），避免点到很久以前的旧按钮
+BUY_BUTTON_TTL = 600
 
 STATUS_TEXT = {
     "success": "购买成功",
@@ -150,7 +159,7 @@ class OyunforGiftCard(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png"
     # 插件版本
-    plugin_version = "1.3.7"
+    plugin_version = "1.4.0"
     # 插件作者
     plugin_author = "dagenduizhanga"
     # 作者主页
@@ -166,6 +175,7 @@ class OyunforGiftCard(_PluginBase):
     _base_url = BASE_URL
     # 测试时可置 0 跳过拟人等待
     _pause_scale = 1.0
+    _fast_mode = True
 
     # 配置（不含任何敏感信息）
     _enabled = False
@@ -222,6 +232,7 @@ class OyunforGiftCard(_PluginBase):
         self._headless = bool(config.get("headless"))
         self._nav_timeout = self._int(config.get("nav_timeout"), 60, 20, 300)
         self._clear_cart = bool(config.get("clear_cart", True))
+        self._fast_mode = bool(config.get("fast_mode", True))
         self._show_code = bool(config.get("show_code", True))
         self._selectors = config.get("selectors") or ""
         self._keep_runs = self._int(config.get("keep_runs"), 10, 1, 100)
@@ -264,7 +275,8 @@ class OyunforGiftCard(_PluginBase):
             "pay_mode": self._pay_mode, "pay_timeout": self._pay_timeout, "max_total": self._max_total,
             "daily_limit": self._daily_limit, "verify_timeout": self._verify_timeout, "cron": self._cron,
             "use_proxy": self._use_proxy, "proxy_url": self._proxy_url, "headless": self._headless,
-            "nav_timeout": self._nav_timeout, "clear_cart": self._clear_cart, "show_code": self._show_code,
+            "nav_timeout": self._nav_timeout, "clear_cart": self._clear_cart, "fast_mode": self._fast_mode,
+            "show_code": self._show_code,
             "selectors": self._selectors, "keep_runs": self._keep_runs, "history_days": self._history_days,
         }
 
@@ -466,10 +478,11 @@ class OyunforGiftCard(_PluginBase):
             lines = [
                 "👉 银行会把验证码发到你的手机（短信 / App 里显示），收到后回复：",
                 f"{self._cmd('code')} 123456",
-                "如果银行只要你在 App 里点确认（如 OKX），确认后页面会自动继续，不用回复。",
+                "如果银行只要你在 App 里点确认，确认后页面会自动继续，不用回复。",
             ]
             buttons = [[{"text": "✅ 已在 App 确认", "callback_data": f"[PLUGIN]{plugin_id}|approved"}, cancel]]
         lines.append(f"不想买了：{self._cmd('cancel')}；⏳ {minutes} 分钟内有效")
+        detail = mask_card_text(detail)
         if detail:
             lines.append(f"📄 页面：{detail[:100]}")
         self.send(job.reply, title, "\n".join(lines), buttons=buttons, force=True, save_history=False)
@@ -603,7 +616,8 @@ class OyunforGiftCard(_PluginBase):
         thread = threading.Thread(target=self._purchase_worker, args=(job, request), daemon=True,
                                   name=f"oyunfor-{job.id}")
         thread.start()
-        target = (f"{amount} TL（{product_url}）" if amount and product_url else product_url or f"{amount} TL")
+        shown_url = "" if product_url.rstrip("/") == DEFAULT_PRODUCT_URL else product_url
+        target = (f"{amount} TL（{shown_url}）" if amount and shown_url else shown_url or f"{amount} TL")
         what = "演练" if dry_run else "购买"
         return True, f"开始{what}：{target} × {request.quantity}（{PAY_MODE_SHORT[self._pay_mode]}）"
 
@@ -648,7 +662,8 @@ class OyunforGiftCard(_PluginBase):
         page.set_default_timeout(30000)
         overrides, _ = load_overrides(self._selectors)
         shop = OyunforShop(context, page, base_url=self._base_url, log=recorder.note, recorder=recorder,
-                           overrides=overrides, nav_timeout=self._nav_timeout, pause_scale=self._pause_scale)
+                           overrides=overrides, nav_timeout=self._nav_timeout,
+                           pause_scale=self._pause_scale * (FAST_PAUSE_SCALE if self._fast_mode else 1.0))
         return context, closer, shop
 
     def _save_state(self, context: Any, keep: bool):
@@ -680,7 +695,9 @@ class OyunforGiftCard(_PluginBase):
         recorder = self._make_recorder(job)
         try:
             what = "演练" if request.dry_run else "购买"
-            target = request.product_url or f"{request.amount} TL"
+            target = (f"{request.amount} TL" if request.amount and (
+                not request.product_url or request.product_url.rstrip("/") == DEFAULT_PRODUCT_URL)
+                      else request.product_url or f"{request.amount} TL")
             recorder.note(f"开始{what}（{job.trigger}）：{target} × {request.quantity}，付款方式 {request.pay_mode}")
             if self._has_target(job.reply):
                 self.send(job.reply, f"【Oyunfor 开始{what}】", f"{target} × {request.quantity}")
@@ -846,7 +863,7 @@ class OyunforGiftCard(_PluginBase):
 
     def get_command(self) -> List[Dict[str, Any]]:
         commands = [
-            ("buy", "Oyunfor 购买礼品卡（参数：面额 数量，如 250 1）"),
+            ("buy", "Oyunfor 购买礼品卡（不带参数=点按钮选面额；或直接写 面额 数量，如 250 1）"),
             ("code", "Oyunfor 提交验证码（参数：验证码；不带参数=已在App确认）"),
             ("paid", "Oyunfor 我已用币安付款（让插件去订单页确认）"),
             ("cancel", "Oyunfor 取消当前购买"),
@@ -860,6 +877,77 @@ class OyunforGiftCard(_PluginBase):
             "data": {"action": self.__action(name)},
         } for name, desc in commands]
 
+    # ------------------------------------------------------------------ 机器人选面额
+    def _menu_amounts(self) -> List[int]:
+        return [a for a in MENU_AMOUNTS if not self._max_total or a <= self._max_total + 0.01]
+
+    def send_amount_menu(self, reply: Optional[dict]):
+        """/oyunfor_buy 不带参数：发面额按钮"""
+        plugin_id = self.__class__.__name__
+        amounts = self._menu_amounts()
+        rows = [[{"text": f"{a} TL", "callback_data": f"[PLUGIN]{plugin_id}|pick:{a}:1"} for a in amounts[i:i + 4]]
+                for i in range(0, len(amounts), 4)]
+        rows.append([{"text": "❌ 不买了", "callback_data": f"[PLUGIN]{plugin_id}|nobuy"}])
+        lines = [f"付款方式：{PAY_MODE_SHORT[self._pay_mode]}" + (f"；单笔上限 {self._max_total:g} TL" if self._max_total else ""),
+                 "点面额后会再确认一次，确认了才开始买。",
+                 f"其他面额（100~2000 的整数）直接发：{self._cmd('buy')} 375 1（面额 数量）"]
+        if self._dry_run:
+            lines.append("⚠️ 现在开着「演练模式」：只会走到付款前一步，不扣款")
+        self.send(reply, "【Oyunfor 选择面额】", "\n".join(lines), buttons=rows, force=True, save_history=False)
+
+    def send_buy_confirm(self, reply: Optional[dict], amount: int, quantity: int):
+        """选了面额：再确认一次（可改数量、只演练）"""
+        plugin_id = self.__class__.__name__
+        stamp = format(int(time.time()), "x")
+        go = "dry" if self._dry_run else "buy"
+        rows = [
+            [{"text": f"{'✓ ' if q == quantity else ''}{q} 张", "callback_data": f"[PLUGIN]{plugin_id}|pick:{amount}:{q}"}
+             for q in (1, 2, 3)],
+            [{"text": f"✅ 购买 {amount} TL × {quantity}" if go == "buy" else f"🧪 演练 {amount} TL × {quantity}",
+              "callback_data": f"[PLUGIN]{plugin_id}|{go}:{amount}:{quantity}:{stamp}"}],
+            [{"text": "🧪 只演练", "callback_data": f"[PLUGIN]{plugin_id}|dry:{amount}:{quantity}:{stamp}"},
+             {"text": "↩️ 换面额", "callback_data": f"[PLUGIN]{plugin_id}|menu"},
+             {"text": "❌ 不买了", "callback_data": f"[PLUGIN]{plugin_id}|nobuy"}],
+        ]
+        if go == "dry":
+            rows[2].pop(0)
+        lines = [f"🎁 {amount} TL App Store 卡 × {quantity}（共 {amount * quantity} TL）",
+                 f"付款方式：{PAY_MODE_SHORT[self._pay_mode]}" + ("（PayTR 另收约 2.5% 手续费）" if self._pay_mode == "card" else ""),
+                 f"按钮 {BUY_BUTTON_TTL // 60} 分钟内有效。"]
+        if self._max_total and amount * quantity > self._max_total + 0.01:
+            lines.append(f"⚠️ 超过单笔上限 {self._max_total:g} TL，会被拦下，请减少数量")
+        if self._dry_run:
+            lines.append("⚠️ 现在开着「演练模式」：只会走到付款前一步，不扣款。要真买请先在插件设置里关掉")
+        self.send(reply, "【Oyunfor 确认购买】", "\n".join(lines), buttons=rows, force=True, save_history=False)
+
+    def handle_buy_button(self, reply: dict, text: str) -> bool:
+        """处理选面额 / 确认购买按钮；不是这类按钮返回 False"""
+        if text == "menu":
+            self.send_amount_menu(reply)
+            return True
+        if text == "nobuy":
+            self.send(reply, "【Oyunfor】", "好的，不买了", force=True, save_history=False)
+            return True
+        match = re.fullmatch(r"(pick|buy|dry):(\d{2,5}):(\d{1,2})(?::([0-9a-f]+))?", text)
+        if not match:
+            return False
+        action, amount, quantity, stamp = match.group(1), int(match.group(2)), int(match.group(3)), match.group(4)
+        if not 1 <= quantity <= 10 or not 100 <= amount <= 2000:
+            self.send(reply, "【Oyunfor】", "面额应在 100~2000 TL，数量 1~10", force=True)
+            return True
+        if action == "pick":
+            self.send_buy_confirm(reply, amount, quantity)
+            return True
+        if not stamp or time.time() - int(stamp, 16) > BUY_BUTTON_TTL:
+            self.send(reply, "【Oyunfor】", "这个按钮已过期，请重新选择面额", force=True, save_history=False)
+            self.send_amount_menu(reply)
+            return True
+        ok, message = self.start_purchase(amount=amount, quantity=quantity, reply=reply, trigger="按钮",
+                                          force_dry=action == "dry")
+        if not ok:
+            self.send(reply, "【Oyunfor】", message, force=True)
+        return True
+
     @eventmanager.register(EventType.PluginAction)
     def handle_command(self, event: Event = None):
         if not event:
@@ -872,6 +960,10 @@ class OyunforGiftCard(_PluginBase):
         reply = {"channel": data.get("channel"), "userid": data.get("user")}
         arg_str = str(data.get("arg_str") or "").strip()
         if name == "buy":
+            if not arg_str:
+                # 不带参数：发面额按钮，选好、确认后再买
+                self.send_amount_menu(reply)
+                return
             amount, url, quantity, force_dry, error = self.parse_buy_args(arg_str)
             if error:
                 self.send(reply, "【Oyunfor】", f"{error}\n用法：{self._cmd('buy')} [面额|商品链接] [数量] [dry]", force=True)
@@ -907,6 +999,7 @@ class OyunforGiftCard(_PluginBase):
         elif text == "cancel":
             ok, message = self.cancel_job()
         else:
+            self.handle_buy_button(reply, text)
             return
         self.send(reply, "【Oyunfor 验证】", message, force=True)
 
@@ -1077,8 +1170,8 @@ class OyunforGiftCard(_PluginBase):
 
         advanced = [
             {"component": "VRow", "content": [
-                hint(12, "VTextField", "留空 = App Store 分类页；可以填整页分类地址（按面额在里面挑），也可以填单个商品页",
-                     model="product_url", label="商品链接", placeholder="https://www.oyunfor.com/apple-store/apple-store-itunes-gift-card"),
+                hint(12, "VTextField", "默认就是 App Store 分类页（按面额在里面挑），一般不用改；留空也一样",
+                     model="product_url", label="商品链接", placeholder=DEFAULT_PRODUCT_URL),
             ]},
             {"component": "VRow", "content": [
                 hint(4, "VTextField", "应付超过就停下；0 = 不限", model="max_total", label="单笔上限（TL）", type="number"),
@@ -1101,6 +1194,9 @@ class OyunforGiftCard(_PluginBase):
                 hint(3, "VSwitch", "避免演练留下的商品混进订单", model="clear_cart", label="下单前清空购物车"),
                 hint(3, "VSwitch", "关闭则只显示首尾 4 位", model="show_code", label="通知显示完整兑换码"),
                 hint(3, "VTextField", "加密保存的截图保留几次", model="keep_runs", label="保留运行记录", type="number"),
+            ]},
+            {"component": "VRow", "content": [
+                hint(3, "VSwitch", "点击之间的停顿缩短到约 30%；遇到网站拦截再关掉", model="fast_mode", label="快速模式"),
             ]},
             {"component": "VRow", "content": [
                 hint(12, "VTextarea", "页面结构与预期不同时使用，键名见插件说明", model="selectors",
@@ -1141,10 +1237,10 @@ class OyunforGiftCard(_PluginBase):
         model = {
             "enabled": False, "dry_run": True, "onlyonce": False, "notify": True,
             "amount": "250", "quantity": 1, "pay_mode": "balance",
-            "product_url": "", "max_total": 2000, "daily_limit": 3, "cron": "",
+            "product_url": DEFAULT_PRODUCT_URL, "max_total": 2000, "daily_limit": 3, "cron": "",
             "verify_timeout": 300, "pay_timeout": 15, "nav_timeout": 60,
             "use_proxy": False, "proxy_url": "",
-            "headless": False, "clear_cart": True, "show_code": True, "keep_runs": 10,
+            "headless": False, "clear_cart": True, "fast_mode": True, "show_code": True, "keep_runs": 10,
             "selectors": "", "history_days": 180,
         }
         return form, model
