@@ -502,3 +502,43 @@ def test_bank_page_needs_send_code_click_and_early_code(oyun, site):
     record = oyun.get_data("history")[-1]
     assert record["code"] == "success", record
     assert len(site.posts("/acs/request")) == 1 and site.state()["otp_attempts"] == 1
+
+
+
+# ---------------------------------------------------------------- 真实分类页的几种写法
+def test_listing_rendered_by_script_with_div_buttons(oyun, site):
+    """商品列表由脚本延迟渲染、「SEPETE EKLE」是 div + 图标字体，加入购物车用 fetch 不跳页"""
+    site.set(listing_style="ajax")
+    oyun.init_plugin(make_config(product_url=f"{site.url}{CATEGORY}", amount="250"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert record["product"] == "250 TL App Store Card"
+    assert [(item["product"], item["from"]) for item in _cart_posts(site)] == [("250", "ajax")]
+    assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
+
+
+def test_script_listing_custom_amount(oyun, site):
+    site.set(listing_style="ajax")
+    oyun.init_plugin(make_config(amount="150"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert _cart_posts(site)[0]["tutar"] == "150" and record["total"] == 150.0
+
+
+def test_listing_without_add_buttons_falls_back_to_detail_page(oyun, site):
+    """列表上认不出「Sepete Ekle」：打开对应商品的 DETAY 详情页再买"""
+    site.set(listing_style="nobuttons")
+    oyun.init_plugin(make_config(product_url=f"{site.url}{CATEGORY}", amount="250"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert orders(site)[1001]["product"] == "250" and record["total"] == 262.5
+
+
+def test_failure_message_lists_what_was_seen(oyun, site):
+    """完全认不出列表时不能乱买：停下，并在失败消息里写明页面上看到了什么，方便对照真实页面调整"""
+    site.set(listing_style="empty")
+    oyun.init_plugin(make_config(product_url=f"{site.url}{CATEGORY}", amount="250"))
+    record = run(oyun)
+    assert record["code"] == "failed", record
+    assert "看到的按钮" in record["message"], record
+    assert not _cart_posts(site)

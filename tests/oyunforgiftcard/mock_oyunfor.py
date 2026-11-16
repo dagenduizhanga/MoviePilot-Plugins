@@ -46,6 +46,7 @@ def _default_state():
         "success_shows_code": True,
         "checkout_style": "radios",   # radios / buttons
         "show_buy_now": True,
+        "listing_style": "plain",      # plain / ajax / nobuttons / empty
         "binance_mode": "onsite",      # onsite / hosted
         "binance_autoredirect": True,
         "binance_paid": [],
@@ -277,6 +278,8 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["cart"].append(item)
             if path == "/sepet/hemen-al":
                 return self.redirect("/odeme")
+            if data.get("from") == "ajax":
+                return self.send_json({"ok": True})
             if data.get("from") == "liste":
                 return self.redirect(f"{CATEGORY}?added=1")
             return self.redirect(f"{CATEGORY}/{PRODUCTS[product]['slug']}?added=1")
@@ -337,6 +340,9 @@ class Handler(BaseHTTPRequestHandler):
     def category_page(self, added=False, error=""):
         with LOCK:
             stock = STATE["stock"]
+            style = STATE["listing_style"]
+        if style == "ajax":
+            return self.category_page_ajax()
         cards = []
         for key, p in PRODUCTS.items():
             detail = f'<a href="{CATEGORY}/{p["slug"]}" class="btn btn-outline">ℹ DETAY</a>'
@@ -346,6 +352,11 @@ class Handler(BaseHTTPRequestHandler):
                         '<input type="text" name="kurus" placeholder="TL" maxlength="2" style="width:50px"></div>')
             else:
                 body = f'<div class="product-price">{p["price"]:.2f} TL</div>'
+            if style in ("nobuttons", "empty"):
+                cards.append(f'<div class="product-row"><div class="product-name">{html.escape(p["listing"])}</div>'
+                             f'<div class="product-price">{p["price"]:.2f} TL</div>'
+                             f'{detail if style == "nobuttons" else "<span class=badge>Yeni</span>"}</div>')
+                continue
             cards.append(f"""<div class="product-row"><img src="/static/apple-card.svg" width="110" height="72" alt="">
 <div class="product-name">{html.escape(p["listing"])}</div>
 <form method="post" action="/sepet/ekle"><input type="hidden" name="product" value="{key}"><input type="hidden" name="from" value="liste">
@@ -353,6 +364,32 @@ class Handler(BaseHTTPRequestHandler):
         toast = '<div class="toast">Ürün sepete eklendi.</div>' if added else ""
         err = '<div class="alert">Lütfen 100 - 2000 TL arasında bir tutar giriniz.</div>' if error else ""
         return self.page("Apple Store", f"<h1>Apple Store</h1>{toast}{err}<div class='product-list'>{''.join(cards)}</div>")
+
+    def category_page_ajax(self):
+        """商品列表由脚本在页面加载后渲染；加入购物车是 div 做的按钮（带图标字体字符），用 fetch 提交"""
+        items = [{"key": key, "name": p["listing"], "price": p["price"], "slug": p["slug"]} for key, p in PRODUCTS.items()]
+        data = json.dumps(items, ensure_ascii=False)
+        script = """
+<script>
+const ITEMS = %s;
+function addToCart(key, el) {
+  const card = el.closest('.product-item');
+  const body = new URLSearchParams({product: key, from: 'ajax'});
+  const t = card.querySelector('input[name=tutar]'); if (t) { body.set('tutar', t.value); body.set('kurus', card.querySelector('input[name=kurus]').value || '0'); }
+  fetch('/sepet/ekle', {method: 'POST', body}).then(r => r.json()).then(() => {
+    const toast = document.getElementById('toast'); toast.textContent = 'Ürün sepete eklendi'; toast.style.display = 'block';
+  });
+}
+setTimeout(() => {
+  const box = document.getElementById('list');
+  box.innerHTML = ITEMS.map(it => `<div class="product-item"><div class="name">${it.name}</div>` +
+    (it.key === 'custom' ? '<div><input type="text" name="tutar" placeholder="Tutar giriniz."> . <input type="text" name="kurus" placeholder="TL" maxlength="2"></div>'
+                         : `<div class="price">${it.price.toFixed(2)} TL</div>`) +
+    `<div class="actions"><a class="btn btn-default" href="/apple-store/apple-store-itunes-gift-card/${it.slug}"><i class="fa"></i> DETAY</a>` +
+    `<div class="btn btn-success" onclick="addToCart('${it.key}', this)"><i class="fa fa-cart">\uf07a</i> <span>SEPETE EKLE</span></div></div></div>`).join('');
+}, 1200);
+</script>""" % data
+        return self.page("Apple Store", f"<h1>App Store Card</h1><div id='toast' style='display:none'></div><div id='list'>Yükleniyor...</div>{script}")
 
     def cart_page(self):
         with LOCK:

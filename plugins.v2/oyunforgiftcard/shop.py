@@ -270,7 +270,7 @@ JS_FIND_CLICKABLE = "([patterns, opts]) => {" + _JS_FOLD + r"""
     opts = opts || {};
     const regs = patterns.map(p => new RegExp(p, 'i'));
     const excludes = (opts.exclude || []).map(p => new RegExp(p, 'i'));
-    const sel = opts.selector || 'a,button,input[type=submit],input[type=button],input[type=radio],[role=button],[role=radio],[role=tab],label,[onclick],li[data-value],[data-payment],[data-method]';
+    const sel = opts.selector || 'a,button,input[type=submit],input[type=button],input[type=radio],[role=button],[role=radio],[role=tab],label,[onclick],li[data-value],[data-payment],[data-method],div[class*=btn i],span[class*=btn i]';
     const roots = opts.scope ? Array.from(document.querySelectorAll(opts.scope)).filter(visible) : [document];
     const maxLen = opts.maxLen || 60;
     let best = null;
@@ -509,22 +509,34 @@ JS_BINANCE_STATE = "([ignoreIds]) => {" + _JS_FOLD + r"""
 """
 
 JS_PRODUCT_CARDS = "() => {" + _JS_FOLD + r"""
-    const addRe = /^(sepete ekle|add to (cart|basket)|sepete at)\b/;
-    const clickable = 'a,button,input[type=submit],input[type=button],[role=button]';
-    const isAdd = el => addRe.test(label(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || ''));
+    // 「加入购物车」可能是 <a>/<button>，也可能是 div/span 做的按钮，且常常带图标、嵌套
+    const addRe = /(^|\s)(sepete ekle|sepete at|add to (cart|basket))(\s|$)/;
+    const candSel = 'a,button,input[type=submit],input[type=button],[role=button],[onclick],div[class*=btn i],span[class*=btn i],'
+        + 'div[class*=button i],span[class*=button i],[class*=sepet i],[class*=cart i],[data-action]';
+    const textOf = el => label(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+    let hits = Array.from(document.querySelectorAll(candSel)).filter(el => {
+        if (!visible(el)) return false;
+        const t = textOf(el);
+        return t.length <= 30 && addRe.test(t);
+    });
+    // 嵌套命中只留最里面的，再换成可点击的外层元素（同一个按钮只算一次）
+    hits = hits.filter(el => !hits.some(other => other !== el && el.contains(other)));
+    const adds = [];
+    for (const el of hits) {
+        const btn = el.closest('a,button,[role=button],[onclick],input[type=submit],input[type=button]') || el;
+        if (adds.indexOf(btn) < 0) adds.push(btn);
+    }
     const cards = [];
-    for (const btn of document.querySelectorAll(clickable)) {
-        if (!visible(btn) || !isAdd(btn)) continue;
+    for (const btn of adds) {
         // 往上找：只包含这一个「加入购物车」按钮、且带金额文字的最大容器 = 商品卡片
         let node = btn.parentElement, card = null;
-        for (let depth = 0; node && node !== document.body && depth < 10; depth++, node = node.parentElement) {
-            const adds = Array.from(node.querySelectorAll(clickable)).filter(el => visible(el) && isAdd(el));
-            if (adds.length > 1) break;
+        for (let depth = 0; node && node !== document.body && depth < 12; depth++, node = node.parentElement) {
+            if (adds.filter(other => node.contains(other)).length > 1) break;
             if (/\d\s*(tl|₺|try)\b/.test(fold(node.innerText || ''))) card = node;
         }
         if (!card) continue;
         const raw = card.innerText || '';
-        const heading = card.querySelector('h1,h2,h3,h4,h5,h6,[class*=title i],[class*=name i],[class*=baslik i]');
+        const heading = card.querySelector('h1,h2,h3,h4,h5,h6,[class*=title i],[class*=name i],[class*=baslik i],[class*=isim i]');
         let title = heading && visible(heading) ? heading.innerText : '';
         if (!title || !/\d/.test(title)) title = raw.split('\n').map(t => t.trim()).find(t => t && /\d/.test(t)) || raw.split('\n')[0] || '';
         let detail = '';
@@ -539,6 +551,58 @@ JS_PRODUCT_CARDS = "() => {" + _JS_FOLD + r"""
                     text: raw.replace(/\s+/g, ' ').trim().slice(0, 400), detail, inputs, disabled});
     }
     return cards;
+}
+"""
+
+# 列表页的「DETAY」链接（认不出加入购物车按钮时，退而打开对应商品的详情页）
+JS_DETAIL_LINKS = "() => {" + _JS_FOLD + r"""
+    const links = Array.from(document.querySelectorAll('a[href]')).filter(a => visible(a)
+        && /^(detay|detaylar|detail|details|incele|urunu incele)$/.test(label(a.innerText || a.getAttribute('title') || '')));
+    const out = [];
+    for (const a of links) {
+        let node = a.parentElement, card = null;
+        for (let depth = 0; node && node !== document.body && depth < 12; depth++, node = node.parentElement) {
+            if (links.filter(other => node.contains(other)).length > 1) break;
+            if (/\d\s*(tl|₺|try)\b/.test(fold(node.innerText || ''))) card = node;
+        }
+        if (!card) continue;
+        const raw = card.innerText || '';
+        const heading = card.querySelector('h1,h2,h3,h4,h5,h6,[class*=title i],[class*=name i],[class*=baslik i],[class*=isim i]');
+        let title = heading && visible(heading) ? heading.innerText : '';
+        if (!title || !/\d/.test(title)) title = raw.split('\n').map(t => t.trim()).find(t => t && /\d/.test(t)) || '';
+        out.push({title: title.replace(/\s+/g, ' ').trim().slice(0, 160), href: a.href, inputs: []});
+    }
+    return out;
+}
+"""
+
+# 页面上有几个不同的价格（列表页通常很多，单个商品页通常一个）
+JS_PRICE_COUNT = "() => {" + _JS_FOLD + r"""
+    const seen = new Set();
+    for (const el of document.querySelectorAll('[class*=price i],[class*=fiyat i]')) {
+        if (!visible(el) || el.closest('del,s,strike') || /(old|eski|strike|indirimsiz)/i.test(el.className || '')) continue;
+        if (el.querySelector('[class*=price i],[class*=fiyat i]')) continue;
+        const t = fold(el.innerText || '');
+        if (/\d/.test(t) && /(tl|₺|try)/.test(t)) seen.add(el);
+    }
+    return seen.size;
+}
+"""
+
+# 失败时报告「插件在页面上看到了什么」，方便对照真实页面调整
+JS_PAGE_SUMMARY = "() => {" + _JS_FOLD + r"""
+    const h1 = Array.from(document.querySelectorAll('h1')).find(visible);
+    const sel = 'a,button,input[type=submit],input[type=button],[role=button],[onclick],div[class*=btn i],span[class*=btn i]';
+    const seen = [];
+    for (const el of document.querySelectorAll(sel)) {
+        if (!visible(el)) continue;
+        const t = (el.innerText || el.value || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+        if (!t || t.length > 24 || seen.indexOf(t) >= 0) continue;
+        seen.push(t);
+        if (seen.length >= 40) break;
+    }
+    return {title: document.title || '', h1: h1 ? h1.innerText.trim().slice(0, 60) : '', path: location.pathname,
+            buttons: seen};
 }
 """
 
@@ -1072,6 +1136,36 @@ class OyunforShop:
                 return values[0]
         return None
 
+    def page_summary(self) -> str:
+        """一句话描述当前页面：标题、地址、看到的按钮"""
+        try:
+            info = self.page.evaluate(JS_PAGE_SUMMARY) or {}
+        except Exception:  # noqa
+            return ""
+        buttons = "、".join(info.get("buttons") or []) or "（无）"
+        return f"页面「{info.get('h1') or info.get('title')}」（{info.get('path')}）上看到的按钮：{buttons[:300]}"
+
+    def wait_products(self, timeout: float = 15.0) -> List[Dict[str, Any]]:
+        """商品列表可能是脚本加载 / 滚动懒加载的：等卡片出现、数量稳定"""
+        deadline = time.time() + timeout * max(self.pause_scale, 0.2)
+        cards = self.product_cards()
+        last = -1
+        while time.time() < deadline:
+            if cards and len(cards) == last:
+                break
+            last = len(cards)
+            try:
+                self.page.evaluate("() => window.scrollBy(0, Math.max(400, window.innerHeight))")
+                self.page.wait_for_timeout(1000)
+            except Exception:  # noqa
+                time.sleep(1)
+            cards = self.product_cards()
+        try:
+            self.page.evaluate("() => window.scrollTo(0, 0)")
+        except Exception:  # noqa
+            pass
+        return cards
+
     def product_cards(self) -> List[Dict[str, Any]]:
         try:
             cards = self.page.evaluate(JS_PRODUCT_CARDS) or []
@@ -1092,7 +1186,7 @@ class OyunforShop:
         self.chosen_card = None
         url = product_url or self.overrides.get("category_url") or CATEGORY_PATH
         self.goto(url, "商品页" if product_url else "礼品卡分类页")
-        cards = self.product_cards()
+        cards = self.wait_products()
         self.snap("listing" if len(cards) >= 2 else "product-page")
         if cards:
             self.note(f"页面上有 {len(cards)} 个商品：" + "；".join(card.get("title", "")[:40] for card in cards[:8]))
@@ -1100,10 +1194,36 @@ class OyunforShop:
             card, custom = pick_card(cards, want)
             if card:
                 return self._use_card(card, want, custom)
-        if len(cards) >= 2:
+        try:
+            details = [d for d in (self.page.evaluate(JS_DETAIL_LINKS) or []) if isinstance(d, dict)]
+        except Exception:  # noqa
+            details = []
+        if want and details and len(cards) < 2:
+            # 认不出列表上的「Sepete Ekle」：打开对应商品的详情页再买
+            detail, custom = pick_card(details, want)
+            if detail and not custom:
+                self.note(f"列表上没认出加入购物车按钮，打开「{detail['title']}」的详情页")
+                self.goto(detail["href"], "商品详情页")
+                product = self.inspect_product()
+                if product.face_value and product.face_value != want:
+                    self.snap("product-mismatch")
+                    raise FlowError("failed", f"详情页面额为 {product.face_value} TL，与要买的 {want} TL 不符，已停止")
+                product.face_value = product.face_value or want
+                if not product.title or not re.search(rf"(?<!\d){want}(?!\d)", fold(product.title)):
+                    product.title = detail["title"]
+                return product
+        try:
+            prices = int(self.page.evaluate(JS_PRICE_COUNT) or 0)
+        except Exception:  # noqa
+            prices = 0
+        if len(cards) >= 2 or len(details) >= 2 or prices >= 3:
+            if not cards:
+                self.snap("listing-unrecognized")
+                raise FlowError("failed", "这是商品列表页，但没认出可以买的商品。" + self.page_summary())
             if not want:
                 raise FlowError("failed", "这是商品列表页，请同时填写面额，插件才知道买哪一个")
-            raise FlowError("failed", f"页面里没有 {want} TL 的商品，也没有能填这个金额的自定义金额商品")
+            titles = "；".join(card.get("title", "")[:30] for card in cards[:10])
+            raise FlowError("failed", f"页面里没有 {want} TL 的商品，也没有能填这个金额的自定义金额商品。页面上的商品：{titles}")
         if not product_url:
             if not amount:
                 raise FlowError("failed", "没有指定面额或商品链接")
@@ -1315,7 +1435,7 @@ class OyunforShop:
                 pass
             else:
                 self.snap("product-no-button")
-                raise FlowError("failed", "商品页没有找到「Hemen Al / Sepete Ekle」按钮（可能缺货、未登录或页面结构不同）")
+                raise FlowError("failed", "没有认出商品卡片，也没找到「Hemen Al / Sepete Ekle」按钮。" + self.page_summary())
         self.settle()
         self.pause(1.0, 2.0)
         if not self._looks_like_checkout() and not self._looks_like_cart():
