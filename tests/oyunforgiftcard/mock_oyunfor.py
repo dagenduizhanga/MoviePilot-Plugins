@@ -46,6 +46,10 @@ def _default_state():
         "success_shows_code": True,
         "checkout_style": "radios",   # radios / buttons
         "show_buy_now": True,
+        "cart_path": "/sepet",          # 购物车地址
+        "header_cart": "text",          # text / icon（只有购物车图标和数量）
+        "cart_button": "odemeye_gec",   # odemeye_gec / satinal_link / satinal_submit
+        "balance_label": "Bakiye ile Öde",
         "listing_style": "plain",      # plain / ajax / nobuttons / empty
         "binance_mode": "onsite",      # onsite / hosted
         "binance_autoredirect": True,
@@ -145,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
         return f"""<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>{html.escape(title)} - Oyunfor</title>
 <style>body{{font-family:sans-serif;margin:0}} header,main,footer{{padding:12px}} .hidden{{display:none}}
 [role=dialog]{{position:fixed;top:30%;left:30%;background:#fff;border:2px solid #333;padding:20px}}</style></head>
-<body><header><a href="/">Oyunfor</a> <a href="{CATEGORY}">App Store</a> {nav} <a href="/sepet">Sepetim ({cart_n})</a></header>
+<body><header><a href="/">Oyunfor</a> <a href="{CATEGORY}">App Store</a> {nav} {self.header_cart(cart_n)}</header>
 <main>{body}</main>
 <footer>Oyunfor'u tercih ettiğiniz için teşekkür ederiz. <a href="/iletisim">İletişim</a>
 <a href="https://www.binance.com/en">Binance</a></footer></body></html>"""
@@ -179,14 +183,16 @@ class Handler(BaseHTTPRequestHandler):
             if not product:
                 return self.send_html(self.page("404", "<h1>Sayfa bulunamadı</h1>"), status=404)
             return self.send_html(self.product_page(product, added=query.get("added") == "1"))
-        if path == "/sepet":
+        with LOCK:
+            cart_path = STATE["cart_path"]
+        if path == cart_path:
             return self.send_html(self.cart_page())
         if path == "/odeme":
             if not self.session():
                 return self.redirect("/giris")
             with LOCK:
                 if not STATE["cart"]:
-                    return self.redirect("/sepet")
+                    return self.redirect(STATE["cart_path"])
             return self.send_html(self.checkout_page(query.get("hata", "")))
         if path == "/odeme/kart":
             order = int(query.get("order", "0"))
@@ -283,12 +289,14 @@ class Handler(BaseHTTPRequestHandler):
             if data.get("from") == "liste":
                 return self.redirect(f"{CATEGORY}?added=1")
             return self.redirect(f"{CATEGORY}/{PRODUCTS[product]['slug']}?added=1")
+        if path == "/sepet/onay":
+            return self.redirect("/odeme")
         if path == "/sepet/sil":
             idx = int(data.get("index") or 0)
             with LOCK:
                 if 0 <= idx < len(STATE["cart"]):
                     STATE["cart"].pop(idx)
-            return self.redirect("/sepet")
+            return self.redirect(STATE["cart_path"])
         if path == "/odeme":
             return self.checkout_submit(data)
         if path == "/paytr/pay":
@@ -323,8 +331,8 @@ class Handler(BaseHTTPRequestHandler):
             buttons = '<div class="stock-out">Stokta Yok</div><button disabled>Sepete Ekle</button>'
         dialog = ""
         if added:
-            dialog = """<div role="dialog" class="modal show"><p>Ürün sepetinize eklendi.</p>
-<a href="/" class="btn">Alışverişe Devam Et</a> <a href="/sepet" class="btn">Sepete Git</a></div>"""
+            dialog = f"""<div role="dialog" class="modal show"><p>Ürün sepetinize eklendi.</p>
+<a href="/" class="btn">Alışverişe Devam Et</a> <a href="{STATE['cart_path']}" class="btn">Sepete Git</a></div>"""
         body = f"""<h1>{html.escape(p['title'])}</h1>
 <div class="product-price"><del class="old-price">{money(p['price'] + 10)} TL</del> <span class="price">{money(p['price'])} TL</span></div>
 <p>Türkiye bölgesinden kullanılabilir.</p>{buttons}{dialog}"""
@@ -403,7 +411,25 @@ setTimeout(() => {
                        for n, i in enumerate(cart))
         return self.page("Sepetim", f"""<h1>Sepetim</h1><table>{rows}</table>
 <div class="cart-total">Toplam: {money(total)} TL</div><a href="/" class="btn">Alışverişe Devam Et</a>
-<a href="/odeme" class="btn btn-primary">Ödemeye Geç</a>""")
+{self.cart_button()}""")
+
+    @staticmethod
+    def cart_button():
+        with LOCK:
+            kind = STATE["cart_button"]
+        if kind == "satinal_link":
+            return '<a href="/odeme" class="btn btn-primary">SATIN AL</a>'
+        if kind == "satinal_submit":
+            return '<form method="post" action="/sepet/onay"><button type="submit" class="btn btn-primary">SATIN AL</button></form>'
+        return '<a href="/odeme" class="btn btn-primary">Ödemeye Geç</a>'
+
+    @staticmethod
+    def header_cart(count):
+        with LOCK:
+            cart_path, kind = STATE["cart_path"], STATE["header_cart"]
+        if kind == "icon":
+            return f'<a href="{cart_path}" class="header-cart"><i class="fa fa-shopping-cart"></i><span class="badge">{count}</span></a>'
+        return f'<a href="{cart_path}">Sepetim ({count})</a>'
 
     def checkout_page(self, error=""):
         with LOCK:
@@ -422,7 +448,7 @@ setTimeout(() => {
 <button type="submit" name="method" value="binance" class="pay">Binance Pay ile Öde</button>"""
         else:
             methods = f"""<div class="payment-methods">
-<label><input type="radio" name="method" value="bakiye"> Bakiye ile Öde (Bakiyeniz: {money(balance)} TL)</label>
+<label><input type="radio" name="method" value="bakiye"> {html.escape(STATE["balance_label"])} (Bakiyeniz: {money(balance)} TL)</label>
 <label><input type="radio" name="method" value="kart"> Kredi Kartı / Banka Kartı</label>
 <label><input type="radio" name="method" value="binance"> <img src="/static/binance-logo.svg" class="pay-logo" width="24" height="24" alt="Binance"> Binance Pay (USDT)</label></div>
 <button type="submit" class="btn-pay">Ödemeyi Tamamla</button>"""
@@ -439,7 +465,7 @@ setTimeout(() => {
             total = self.cart_total()
             cart = list(STATE["cart"])
             if not cart:
-                return self.redirect("/sepet")
+                return self.redirect(STATE["cart_path"])
             order_id = STATE["next_order"]
             STATE["next_order"] += 1
             qty = sum(i["qty"] for i in cart)

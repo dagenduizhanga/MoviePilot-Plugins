@@ -542,3 +542,43 @@ def test_failure_message_lists_what_was_seen(oyun, site):
     assert record["code"] == "failed", record
     assert "看到的按钮" in record["message"], record
     assert not _cart_posts(site)
+
+
+# ---------------------------------------------------------------- 购物车 → 结算的几种写法
+def test_icon_only_cart_link_and_other_cart_path(oyun, site):
+    """页头只有购物车图标（没有文字），购物车地址也不是 /sepet"""
+    site.set(header_cart="icon", cart_path="/sepetim")
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
+
+
+def test_dry_run_never_submits_risky_cart_button(oyun, site):
+    """购物车的下一步是写着「SATIN AL」的提交按钮：演练不点（可能直接下单），实买才点"""
+    site.set(cart_button="satinal_submit")
+    oyun.init_plugin(make_config(dry_run=True))
+    record = run(oyun)
+    assert record["code"] == "dry_run", record
+    assert "演练停在购物车" in record["message"] and "SATIN AL" in record["message"]
+    assert not site.posts("/sepet/onay") and not site.posts("/odeme")
+    oyun.init_plugin(make_config())
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert len(site.posts("/sepet/onay")) == 1
+
+
+def test_dry_run_follows_risky_named_plain_link(oyun, site):
+    """「SATIN AL」只是个普通链接：演练直接打开链接（GET 不会下单），继续走到付款前一步"""
+    site.set(cart_button="satinal_link")
+    oyun.init_plugin(make_config(dry_run=True))
+    record = run(oyun)
+    assert record["code"] == "dry_run", record
+    assert "付款前一步" in record["message"] and record["total"] == 262.5
+    assert not site.posts("/odeme")
+
+
+def test_balance_option_named_oyunfor_bakiyesi(oyun, site):
+    site.set(balance_label="Oyunfor Bakiyesi")
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert site.posts("/odeme")[-1]["data"]["method"] == "bakiye"

@@ -35,12 +35,14 @@ TEXT_PATTERNS: Dict[str, List[str]] = {
     "buy_now": [r"^hemen al\b", r"^hemen satin al\b", r"^satin al$", r"^buy now\b"],
     "add_to_cart": [r"^sepete ekle\b", r"^add to (cart|basket)\b", r"sepete ekle"],
     "go_cart": [r"^sepete git\b", r"^sepeti (goruntule|onayla)\b", r"^sepetim\b", r"^sepet\b", r"^(go to |view )?cart\b"],
-    "checkout": [r"^odemeye gec\b", r"^odeme adimina gec\b", r"^alisverisi tamamla\b", r"^siparisi tamamla\b",
+    "checkout": [r"^odemeye gec\b", r"^odeme adimina gec\b", r"^odeme sayfasina (git|gec)\b", r"^sepeti onayla\b",
+                 r"^kasaya git\b", r"^alisverisi tamamla\b", r"^siparisi tamamla\b",
                  r"^satin al\b", r"^devam et\b", r"^devam\b", r"^checkout\b", r"^proceed\b"],
-    "pay_balance": [r"bakiye ile (ode|odeme|satin al)", r"^(hesap )?bakiye(m|si|niz)?\b", r"bakiyemden", r"\bbakiye\b",
-                    r"\bbalance\b"],
+    "pay_balance": [r"bakiye ile (ode|odeme|satin al)", r"^(hesap )?bakiye(m|si|niz)?\b", r"bakiyemden",
+                    r"\bbakiye(m|si|niz|den)?\b", r"oyunfor ?(pay|bakiye|cuzdan)", r"\bcuzdan(im|dan)?\b",
+                    r"\bbalance\b", r"\bwallet\b"],
     "pay_card": [r"kredi ?(karti)? ?/ ?banka karti", r"kredi karti", r"banka karti", r"kart ile (ode|odeme)",
-                 r"credit ?/ ?debit", r"credit card", r"debit card"],
+                 r"kredi kart", r"banka kart", r"credit ?/ ?debit", r"credit card", r"debit card"],
     "pay_binance": [r"binance ?pay", r"\bbinance\b", r"kripto ?(para)? ile", r"\bkripto\b", r"\bcrypto\b",
                     r"\busdt\b"],
     "remove_item": [r"^sil$", r"^kaldir$", r"^urunu (sil|kaldir)$", r"^sepeti (bosalt|temizle)$", r"^tumunu (sil|kaldir)$",
@@ -70,7 +72,11 @@ OPTION_SELECTOR = ("label,input[type=radio],[role=radio],[role=tab],li[data-valu
                    "li[class*=payment i],li[class*=odeme i],a[class*=payment i],a[class*=odeme i],a[class*=tab i]")
 BUTTON_SELECTOR = "button,input[type=submit],input[type=button],a,[role=button]"
 DIALOG_SCOPE = ("[role=dialog],[role=alertdialog],.modal.show,.modal.in,.swal2-popup,.sweet-alert,.jconfirm-box,"
-                ".popup.active,.mfp-content,.fancybox-content")
+                ".popup.active,.mfp-content,.fancybox-content,.offcanvas.show,.drawer.open,.drawer.active,"
+                "[class*=minicart i],[class*=mini-cart i],[class*=side-cart i],[class*=sepet-popup i],[class*=cart-popup i]")
+# 购物车页「下一步」按钮里这些字样可能直接下单：演练时不点（普通链接则直接打开链接）
+RISKY_NEXT_RE = re.compile(r"(satin al|tamamla|onayla|\bode\b|odeme yap|\bpay\b|place order|confirm|bitir)")
+CART_PATHS = ("/sepet", "/sepetim", "/sepet.html", "/alisveris-sepeti", "/cart")
 SUCCESS_TEXT = [
     r"siparis(iniz)? (basariyla )?(alindi|olusturuldu|tamamlandi|onaylandi)",
     r"odeme(niz)? (basariyla )?(alindi|tamamlandi|basarili)", r"odeme islemi(niz)? basari",
@@ -586,6 +592,18 @@ JS_PRICE_COUNT = "() => {" + _JS_FOLD + r"""
         if (/\d/.test(t) && /(tl|₺|try)/.test(t)) seen.add(el);
     }
     return seen.size;
+}
+"""
+
+# 指向购物车的链接（文字或纯图标），按地址判断
+JS_CART_LINK = r"""
+() => {
+    const ok = a => { const h = (a.getAttribute('href') || '').toLowerCase();
+        return /(sepet|\/cart|basket)/.test(h) && !/(ekle|add|sil|remove|javascript)/.test(h); };
+    const all = Array.from(document.querySelectorAll('a[href]')).filter(ok);
+    const vis = all.filter(a => { const r = a.getBoundingClientRect(); return r.width > 1 && r.height > 1; });
+    const pick = vis[0] || all[0];
+    return pick ? pick.href : null;
 }
 """
 
@@ -1383,11 +1401,28 @@ class OyunforShop:
         cart = self.overrides.get("cart_url")
         if cart:
             self.goto(cart, "购物车")
-        elif self.find_and_click("go_cart", "购物车", maxLen=30, exclude=[r"ekle"]):
+            return self._looks_like_cart()
+        # 1. 页面上指向购物车的链接（文字或纯图标都行），按地址找
+        try:
+            href = self.page.evaluate(JS_CART_LINK)
+        except Exception:  # noqa
+            href = None
+        if href:
+            self.goto(href, "购物车")
+            if self._looks_like_cart():
+                return True
+        # 2. 按文字找
+        if self.find_and_click("go_cart", "购物车", maxLen=30, exclude=[r"ekle"]):
             self.settle()
-        else:
-            self.goto("/sepet", "购物车")
-        return self._looks_like_cart()
+            if self._looks_like_cart():
+                return True
+        # 3. 常见地址
+        for path in CART_PATHS:
+            self.goto(path, "购物车")
+            if self._looks_like_cart():
+                return True
+        self.note("没有找到购物车页面。" + self.page_summary())
+        return False
 
     def clear_cart(self) -> int:
         """清空购物车（尽力而为），避免演练或失败留下的商品混进本次订单"""
@@ -1422,30 +1457,48 @@ class OyunforShop:
             self.snap("cart-cleared")
         return removed
 
-    def start_checkout(self, quantity: int) -> None:
+    def _proceed(self, found: Dict[str, Any], dry_run: bool, what: str):
+        """
+        点「去结算」类按钮。演练时，按钮文字像「Satın Al / Tamamla / Onayla / Öde」的不点：
+        是普通链接就直接打开链接（GET，不会下单），是提交按钮就停下。
+        """
+        text = found.get("text") or ""
+        href = (found.get("href") or "").strip()
+        if dry_run and RISKY_NEXT_RE.search(text):
+            if href and not href.lower().startswith(("javascript", "#")):
+                self.note(f"演练：「{text}」是普通链接，直接打开（不提交任何表单）")
+                self.goto(urljoin(self.page.url, href), "结算页")
+                return
+            self.snap("dry-run-stop")
+            raise FlowError("dry_run", f"演练停在购物车：下一步按钮「{text}」会提交表单，可能直接下单，演练不点它（没有付款）。"
+                                       "关掉演练模式后会继续往下走。" + self.page_summary())
+        if not self.click(found, what=f"{what}（{text}）"):
+            raise FlowError("failed", f"点击「{text}」失败。" + self.page_summary())
+        self.settle()
+
+    def start_checkout(self, quantity: int, dry_run: bool = False) -> None:
         """商品页 → （购物车）→ 结算页"""
         if getattr(self, "chosen_card", None):
             self._add_from_listing(quantity)
         else:
             if quantity > 1 and not self.set_quantity(quantity):
                 raise FlowError("failed", "商品页没有找到数量输入框，无法一次购买多张（可改为分多次购买）")
-            if self.find_and_click("buy_now", "立即购买", maxLen=40):
-                pass
-            elif self.find_and_click("add_to_cart", "加入购物车", maxLen=40):
-                pass
-            else:
+            # 演练时优先「加入购物车」（不会下单），实买时优先「立即购买」
+            order = (("add_to_cart", "加入购物车"), ("buy_now", "立即购买"))
+            if not dry_run:
+                order = order[::-1]
+            if not any(self.find_and_click(key, what, maxLen=40) for key, what in order):
                 self.snap("product-no-button")
                 raise FlowError("failed", "没有认出商品卡片，也没找到「Hemen Al / Sepete Ekle」按钮。" + self.page_summary())
         self.settle()
         self.pause(1.0, 2.0)
         if not self._looks_like_checkout() and not self._looks_like_cart():
-            # 还停在商品页（地址可能多了参数）：可能弹出了「已加入购物车」对话框
+            # 还停在商品页 / 列表页：可能弹出了「已加入购物车」对话框或侧边小购物车
             found = (self.find("checkout", maxLen=40, scope=DIALOG_SCOPE)
                      or self.find("go_cart", maxLen=40, scope=DIALOG_SCOPE, exclude=[r"ekle"]))
             if found:
                 self.snap("added-dialog")
-                self.click(found, what=f"对话框（{found.get('text')}）")
-                self.settle()
+                self._proceed(found, dry_run, "对话框")
             else:
                 self.open_cart()
             self.pause()
@@ -1456,18 +1509,22 @@ class OyunforShop:
             if not self._looks_like_cart():
                 break
             self.snap("cart")
-            if not self.find_and_click("checkout", "去结算", maxLen=40, exclude=[r"alisverise devam", r"continue shopping"]):
+            found = self.find("checkout", maxLen=40, exclude=[r"alisverise devam", r"continue shopping"])
+            if not found:
                 break
-            self.settle()
+            self._proceed(found, dry_run, "去结算")
             self.pause()
         self.snap("checkout")
         if not self._looks_like_checkout():
-            raise FlowError("failed", "没有进入结算页（没有找到付款方式）")
+            raise FlowError("failed", "没有进入结算页（没有找到付款方式）。" + self.page_summary())
 
     def _looks_like_cart(self) -> bool:
-        if re.search(r"(sepet|cart|basket)", self.page.url, re.I):
+        if not self._page_ok():
+            return False
+        if re.search(r"(sepet|cart|basket)", urlparse(self.page.url).path, re.I):
             return True
-        return bool(self.find("checkout", maxLen=40, patterns=[r"^odemeye gec\b", r"^alisverisi tamamla\b"]))
+        return bool(self.find("checkout", maxLen=40, patterns=[r"^odemeye gec\b", r"^alisverisi tamamla\b",
+                                                               r"^sepeti onayla\b"]))
 
     def _looks_like_checkout(self) -> bool:
         return any(self.find(key, maxLen=80, selector=OPTION_SELECTOR, exclude=PAYMENT_EXCLUDE)
@@ -1484,7 +1541,7 @@ class OyunforShop:
         found = self.find(key, maxLen=80, selector=OPTION_SELECTOR, exclude=PAYMENT_EXCLUDE)
         if not found:
             self.snap("payment-options")
-            raise FlowError("failed", f"结算页没有找到「{what}」选项")
+            raise FlowError("failed", f"结算页没有找到「{what}」选项。" + self.page_summary())
         text = found.get("text") or ""
         if found.get("tag") in ("button", "input", "a") and re.search(
                 r"(\bode\b|odeme yap|satin al|tamamla|onayla|\bpay\b|complete)", text):
@@ -2289,7 +2346,7 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
                 and result.balance + 0.01 < product.price * quantity):
             raise FlowError("insufficient", f"余额 {result.balance:.2f} TL 不足以支付 {product.price * quantity:.2f} TL")
 
-        shop.start_checkout(quantity)
+        shop.start_checkout(quantity, dry_run=request.dry_run)
         option, option_button = shop.select_payment(request.pay_mode)
         shop.note(f"付款方式：{option}")
         shop.tick_agreements()
