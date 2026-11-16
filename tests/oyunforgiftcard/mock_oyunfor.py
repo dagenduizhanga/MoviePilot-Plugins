@@ -68,6 +68,7 @@ def _default_state():
         "binance_autoredirect": True,
         "binance_paid": [],
         "saved_card": False,
+        "gateway_style": "classic",     # classic / paytr2026（真实 PayTR 新页面：Tailwind class、Radix 单选、type=button 付款按钮）
         "cart": [],
         "orders": {1000: {"id": 1000, "product": "100", "qty": 1, "total": 105.0, "status": "Tamamlandı",
                           "codes": ["XOLDCODE00000001"], "method": "bakiye"}},
@@ -632,7 +633,10 @@ document.querySelector('.paymentSender').addEventListener('click', () => {
         with LOCK:
             saved = STATE["saved_card"]
             total = STATE["orders"].get(order, {}).get("total", 0)
-        months = "".join(f'<option value="{m:02d}">{m:02d}</option>' for m in range(1, 13))
+            style = STATE["gateway_style"]
+        if style == "paytr2026" and saved:
+            return self.paytr2026_form(order, total, error)
+        months ="".join(f'<option value="{m:02d}">{m:02d}</option>' for m in range(1, 13))
         years = "".join(f'<option value="{y}">{y}</option>' for y in range(2026, 2036))
         saved_html = ""
         if saved:
@@ -654,6 +658,38 @@ document.querySelector('.paymentSender').addEventListener('click', () => {
 document.getElementById('card_number').addEventListener('input', e => {{
   const d = e.target.value.replace(/\\D/g, '').slice(0, 16);
   e.target.value = d.replace(/(\\d{{4}})(?=\\d)/g, '$1 ');
+}});
+</script></body></html>"""
+
+    @staticmethod
+    def paytr2026_form(order, total, error=""):
+        """仿 2026 年 PayTR「Güvenli Ödeme Sayfası」：已保存卡是 label 包着 Radix 单选 button[role=radio]；
+        付款按钮是 type=button，class 里带 Tailwind 的「disabled:…」样式（按钮本身并没有禁用）"""
+        radio_cls = ("aspect-square h-6 w-6 border-2 rounded-full focus:outline-none "
+                     "data-[state=checked]:border-pay-blue-100 disabled:cursor-not-allowed disabled:opacity-50")
+        pay_cls = ("px-12 inline-flex items-center justify-center gap-2 whitespace-nowrap transition-colors "
+                   "disabled:text-pay-gray-60 disabled:bg-pay-gray-20 disabled:cursor-not-allowed "
+                   "dark:disabled:bg-pay-dark-60 bg-pay-blue-100 text-white py-4 w-full")
+        cards = "".join(f"""<label class="flex items-center justify-start gap-4 cursor-pointer">
+<button type="button" role="radio" aria-checked="false" data-state="unchecked" value="{token}" id="card_{token}" class="{radio_cls}"></button>
+<span>TEST USER</span> <span>**** **** **** {last4}</span> <span>Son Kullanma Tarihi 10/31</span></label>"""
+                        for token, last4 in (("tok_4242", "4242"), ("tok_1881", "1881")))
+        err = f'<p class="err">{html.escape(error)}</p>' if error else ""
+        return f"""<!doctype html><html><head><meta charset="utf-8"><title>Güvenli Ödeme Sayfası - PayTR</title></head><body>
+<button type="button" class="flex items-center justify-between bg-white">TÜRKÇE</button>
+<div>Kart ile Ödeme</div><div>Diğer Ödeme Yöntemleri</div><div>Kayıtlı Kartlarım</div><div>Yeni Kartla Ödeme</div>{err}
+<form method="post" action="/paytr/pay" id="pay-form"><input type="hidden" name="order" value="{order}"><input type="hidden" name="saved" value="">
+{cards}<div>Ödemeniz Gereken Tutar {money(total * 1.025)} TL</div>
+<button type="button" class="{pay_cls}" id="pay">Ödeme Yap</button></form>
+<script>
+document.querySelectorAll('[role=radio]').forEach(r => r.addEventListener('click', () => {{
+  document.querySelectorAll('[role=radio]').forEach(x => {{ x.setAttribute('aria-checked', 'false'); x.dataset.state = 'unchecked'; }});
+  r.setAttribute('aria-checked', 'true'); r.dataset.state = 'checked';
+  document.querySelector('[name=saved]').value = r.value;
+}}));
+document.getElementById('pay').addEventListener('click', () => {{
+  if (!document.querySelector('[name=saved]').value) {{ alert('Lütfen bir kart seçin'); return; }}
+  document.getElementById('pay-form').submit();
 }});
 </script></body></html>"""
 

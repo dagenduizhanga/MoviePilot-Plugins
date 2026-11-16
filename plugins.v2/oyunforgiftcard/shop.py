@@ -284,6 +284,10 @@ const visible = el => {
     const st = getComputedStyle(el);
     return !(st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity || '1') === 0);
 };
+// 元素是否处于禁用状态。class 只认独立的 disabled 类名：Tailwind 的「disabled:bg-gray」这类只是
+// 「禁用时的样式」，按钮本身并没有禁用（PayTR 付款页的「Ödeme Yap」就是这样，之前被误判成禁用）
+const isDisabled = el => !!el.disabled || el.getAttribute('aria-disabled') === 'true'
+    || (typeof el.className === 'string' ? el.className : '').split(/\s+/).some(c => /^(is-|btn-)?disabled$/i.test(c));
 // 按钮文字前后常带图标字符（🛒、ℹ、图标字体私有区字符），匹配前去掉
 const label = s => fold(s).replace(/^[^a-z0-9₺*•·]+/, '').replace(/[^a-z0-9₺)*•·]+$/, '');
 const mark = el => {
@@ -306,7 +310,7 @@ JS_FIND_CLICKABLE = "([patterns, opts]) => {" + _JS_FOLD + r"""
             if (!visible(el)) {
                 if (!(el.tagName === 'INPUT' && el.type === 'radio')) continue;
             }
-            const disabled = !!el.disabled || el.getAttribute('aria-disabled') === 'true' || /\bdisabled\b/.test(el.className || '');
+            const disabled = isDisabled(el);
             if (disabled && !opts.allowDisabled) continue;
             let raw = el.innerText || el.value || '';
             if (!/[a-z0-9]/.test(fold(raw))) raw = el.getAttribute('aria-label') || el.getAttribute('title') || raw;
@@ -573,7 +577,7 @@ JS_PRODUCT_CARDS = "() => {" + _JS_FOLD + r"""
         const inputs = Array.from(card.querySelectorAll('input')).filter(el => visible(el) && !el.disabled
             && !/^(hidden|submit|button|checkbox|radio)$/i.test(el.type || ''))
             .map(el => ({id: mark(el), placeholder: el.getAttribute('placeholder') || '', name: el.name || '', type: el.type || ''}));
-        const disabled = !!btn.disabled || btn.getAttribute('aria-disabled') === 'true' || /\bdisabled\b/.test(btn.className || '');
+        const disabled = isDisabled(btn);
         cards.push({add: mark(btn), title: title.replace(/\s+/g, ' ').trim().slice(0, 160),
                     text: raw.replace(/\s+/g, ' ').trim().slice(0, 400), detail, inputs, disabled});
     }
@@ -1842,6 +1846,25 @@ class OyunforShop:
                 return frame, found
         return None, None
 
+    def _ensure_radio_checked(self, found: Dict[str, Any], frame: Any = None) -> None:
+        """点了已保存卡那一行后，确认里面的单选框真的选中了（PayTR 的单选是 Radix 的 button[role=radio]）"""
+        target = frame or self.page
+        try:
+            state = target.evaluate(r"""id => {
+                const el = document.querySelector('[data-mpx="' + id + '"]');
+                if (!el) return 'missing';
+                const radio = el.matches('[role=radio],input[type=radio]') ? el : el.querySelector('[role=radio],input[type=radio]');
+                if (!radio) return 'none';
+                if (radio.checked || radio.getAttribute('aria-checked') === 'true' || radio.getAttribute('data-state') === 'checked') return 'checked';
+                radio.click();
+                return 'clicked';
+            }""", found["id"])
+        except Exception:  # noqa
+            return
+        if state == "clicked":
+            self.note("已保存卡的单选框还没选中，直接点了单选框")
+            self.pause(0.4, 0.8)
+
     def fill_card(self, card: CardInfo) -> str:
         """选择已保存的卡，或填写卡信息；返回使用方式"""
         if card.use_saved:
@@ -1850,6 +1873,7 @@ class OyunforShop:
                 self.click(found, frame=frame, what=f"已保存的卡（{found.get('text')[:40]}）")
                 self.card_frame = frame
                 self.pause()
+                self._ensure_radio_checked(found, frame)
                 # 已保存卡可能还要求 CVV
                 if card.cvv:
                     for f in self._frames():

@@ -180,6 +180,18 @@ def test_saved_card(oyun, site):
     assert site.posts("/paytr/pay")[-1]["data"].get("saved") == "tok_4242"
 
 
+
+def test_paytr_2026_page_saved_card_and_pay_button(oyun, site):
+    """真实 PayTR 新页面（2026）：已保存卡是 label 包着 Radix 单选；「Ödeme Yap」是 type=button，
+    class 里带 Tailwind 的「disabled:…」样式但按钮并没禁用 —— 之前被误判成禁用，报「没有找到最终的付款按钮」"""
+    site.set(saved_card="1", acs_mode="none", gateway_style="paytr2026",
+             cart_button="oyunfor", cart_path="/sepetim", header_cart="icon", balance="0")
+    oyun.init_plugin(make_config(pay_mode="card"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert site.posts("/paytr/pay")[-1]["data"].get("saved") == "tok_4242"
+    assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
+
 def test_card_cancel_from_button(oyun, site):
     _card(oyun)
     ok, _ = oyun.start_purchase()
