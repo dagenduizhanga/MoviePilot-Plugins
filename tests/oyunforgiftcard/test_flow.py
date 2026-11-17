@@ -869,3 +869,15 @@ def test_menu_shows_only_short_command(oyun):
     shown = {c["cmd"]: c.get("show", True) for c in oyun.get_command()}
     assert shown == {"/oyunfor": True, "/oyunfor_buy": False, "/oyunfor_code": False, "/oyunfor_paid": False,
                      "/oyunfor_cancel": False, "/oyunfor_status": False}
+
+
+def test_code_lookup_opens_purchases_page_directly(oyun, site):
+    """付款成功页上没有兑换码：直接打开「已购商品」页（/profil/aldiklarim），不先打开首页找链接；拿到的是新订单的码"""
+    site.set(success_shows_code="0")
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
+    log = site.state()["log"]
+    paid_at = max(i for i, e in enumerate(log) if e["method"] == "POST" and e["path"] == "/odeme")
+    pages = [e["path"] for e in log[paid_at:] if e["method"] == "GET"]
+    assert "/profil/aldiklarim" in pages and "/" not in pages, pages

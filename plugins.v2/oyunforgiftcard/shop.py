@@ -57,7 +57,8 @@ TEXT_PATTERNS: Dict[str, List[str]] = {
                        r"^ok$"],
     "reveal_code": [r"kodu? (goster|gor|al)\b", r"kodlari (goster|gor)\b", r"^goster$", r"^show (code|pin)\b",
                     r"^reveal\b", r"epin(i)? goster"],
-    "orders_link": [r"^siparislerim$", r"^siparis gecmisi$", r"^siparislerim\b", r"^my orders$", r"^orders$"],
+    "orders_link": [r"^siparislerim$", r"^siparis gecmisi$", r"^siparislerim\b", r"^aldiklarim$", r"^my orders$",
+                    r"^orders$"],
     "order_detail": [r"^detay(lar)?$", r"^detay(i)? (gor|goruntule|goster)\b", r"^goruntule$", r"^incele$",
                      r"siparis detay", r"kodu? (goster|gor)\b", r"^details?$", r"^view$"],
     "login_link": [r"^giris yap$", r"^giris$", r"^uye girisi$", r"^giris yap ?/ ?uye ol$", r"^login$", r"^sign in$"],
@@ -99,6 +100,8 @@ OYUNFOR_SEND_BUTTON = "button.paymentSender"
 CART_PATH_RE = re.compile(r"(^|/)(sepet|sepetim|sepetiniz|alisveris-sepeti|cart|basket|shopping-cart)(/|$|\.)", re.I)
 CART_PATHS = ("/sepet", "/sepetim", "/sepet.html", "/alisveris-sepeti", "/cart")
 OYUNFOR_CART_PATH = "/sepetim"
+# Oyunfor 的「已购商品」页（每笔订单和兑换码都在这里）
+OYUNFOR_ORDERS_PATH = "/profil/aldiklarim"
 SUCCESS_TEXT = [
     r"siparis(iniz)? (basariyla )?(alindi|olusturuldu|tamamlandi|onaylandi)",
     r"odeme(niz)? (basariyla )?(alindi|tamamlandi|basarili)", r"odeme islemi(niz)? basari",
@@ -2694,11 +2697,14 @@ class OyunforShop:
                 self.snap("codes-revealed")
             if codes:
                 return codes, self.page.url
-            # 去订单页：打开最新一笔订单
+            # 去订单页：打开最新一笔订单。直接打开 Oyunfor 的「已购商品」页（/profil/aldiklarim），
+            # 不先在当前页、首页上找「我的订单」链接（少加载一两个页面）；打不开再按老办法找
             self.note("结果页没有兑换码，去订单页查找")
             orders_url = self.overrides.get("orders_url")
             if orders_url:
                 self.goto(orders_url, "订单页")
+                opened = True
+            elif self._open_orders_page(OYUNFOR_ORDERS_PATH):
                 opened = True
             elif self.find_and_click("orders_link", "我的订单", maxLen=30):
                 self.settle()
@@ -2710,8 +2716,7 @@ class OyunforShop:
                     opened = True
         if not opened or not self._page_ok():
             for path in ORDERS_PATHS:
-                self.goto(path, "订单页")
-                if self._page_ok() and re.search(r"siparis|order", fold(self.page_text().get("text"))):
+                if self._open_orders_page(path):
                     opened = True
                     break
         self.snap("orders")
@@ -2732,6 +2737,11 @@ class OyunforShop:
             self.snap("orders-revealed")
         # 订单页可能列出很多历史兑换码：只取最前面的 quantity 个新码
         return codes[:max(1, quantity)], self.page.url
+
+    def _open_orders_page(self, path: str) -> bool:
+        """打开一个订单页地址，像订单页就返回 True"""
+        self.goto(path, "订单页")
+        return self._page_ok() and bool(re.search(r"siparis|order|aldik", fold(self.page_text().get("text"))))
 
     def _page_ok(self) -> bool:
         data = self.page_text()
