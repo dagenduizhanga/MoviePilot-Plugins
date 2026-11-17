@@ -199,7 +199,7 @@ class OyunforGiftCard(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png"
     # 插件版本
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     # 插件作者
     plugin_author = "dagenduizhanga"
     # 作者主页
@@ -1078,7 +1078,7 @@ class OyunforGiftCard(_PluginBase):
             "price": product.price if product else None,
             "quantity": request.quantity,
             "total": result.total,
-            "pay_mode": request.pay_mode,
+            "pay_mode": result.paid_by or request.pay_mode,
             "dry_run": request.dry_run,
             "code": result.status,
             "status": STATUS_TEXT.get(result.status, result.status),
@@ -1116,7 +1116,13 @@ class OyunforGiftCard(_PluginBase):
         if record.get("product"):
             lines.append(f"🎁 {record['product']} × {record['quantity']}")
         if result.total is not None:
-            lines.append(f"💳 应付：{result.total:.2f} TL（{PAY_MODE_SHORT.get(request.pay_mode, request.pay_mode)}）")
+            paid_by = result.paid_by or request.pay_mode
+            if paid_by == "balance" and request.pay_mode in ("card", "binance"):
+                # 设置的是银行卡 / 币安，但余额够付，网站直接用余额下单了
+                how = "余额够付，直接用余额支付，" + ("没有刷卡" if request.pay_mode == "card" else "没有用币安")
+            else:
+                how = PAY_MODE_SHORT.get(paid_by, paid_by)
+            lines.append(f"💳 应付：{result.total:.2f} TL（{how}）")
         if job.pay_info.get("amount"):
             lines.append(f"🪙 币安付款：{job.pay_info['amount']} {job.pay_info.get('currency') or ''}".rstrip())
         if result.codes:

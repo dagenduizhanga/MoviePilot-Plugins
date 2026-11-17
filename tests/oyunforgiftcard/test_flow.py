@@ -632,14 +632,29 @@ def test_oyunfor_cart_enough_balance_order_button_not_clicked_in_dry_run(oyun, s
     assert codes_of(oyun, record) == ["X01001QZ1ABCDEFG"]
 
 
-def test_oyunfor_cart_enough_balance_but_card_mode_stops(oyun, site):
-    """余额够时网站只给「Alışverişi Tamamla」（用余额下单），选了银行卡就停下并说明原因"""
+def test_oyunfor_cart_enough_balance_card_mode_uses_balance(oyun, site):
+    """余额够付时网站只给「Alışverişi Tamamla」（用余额下单）：设置的是银行卡也直接用余额买，不进银行卡页面"""
     site.set(cart_button="oyunfor", cart_path="/sepetim", header_cart="icon")
     _card(oyun, dry_run=True)
     record = run(oyun)
-    assert record["code"] == "failed", record
-    assert "余额已经够付" in record["message"]
+    assert record["code"] == "dry_run" and "余额够付" in record["message"], record
     assert not site.posts("/orders/siparisTamamla") and not site.posts("/payment/paymentSender")
+    _card(oyun)
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert record["pay_mode"] == "balance"
+    assert len(site.posts("/orders/siparisTamamla")) == 1 and not site.posts("/payment/paymentSender")
+    assert not site.posts("/paytr/pay")
+    result = [m for m in oyun.messages if "购买成功" in (m.get("title") or "")][-1]
+    assert "余额够付，直接用余额支付，没有刷卡" in result["text"]
+
+
+def test_oyunfor_cart_enough_balance_binance_mode_uses_balance(oyun, site):
+    site.set(cart_button="oyunfor", cart_path="/sepetim", header_cart="icon")
+    oyun.init_plugin(make_config(pay_mode="binance"))
+    record = run(oyun)
+    assert record["code"] == "success", record
+    assert record["pay_mode"] == "balance" and len(site.posts("/orders/siparisTamamla")) == 1
 
 
 def test_oyunfor_cart_short_balance_goes_to_topup_page(oyun, site):

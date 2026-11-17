@@ -910,6 +910,8 @@ class PurchaseResult:
     paid: bool = False
     verification: str = ""
     steps: List[str] = field(default_factory=list)
+    # 实际付款方式（余额够付时即使设置的是银行卡 / 币安，也直接用余额下单）
+    paid_by: str = ""
 
 
 class FlowError(Exception):
@@ -1983,11 +1985,10 @@ class OyunforShop:
         what = PAY_MODE_TEXT.get(mode, mode)
         order_button = self.balance_order_button
         if order_button:
-            # Oyunfor 余额够付：购物车上的「Alışverişi Tamamla」就是付款按钮，网站不会再给其他付款方式
+            # Oyunfor 余额够付：购物车上的「Alışverişi Tamamla」就是付款按钮，网站不会再给其他付款方式。
+            # 设置的是银行卡 / 币安也直接用余额下单（不刷卡、不用币安）
             if mode != "balance":
-                raise FlowError("failed", f"账户余额已经够付这一单，Oyunfor 购物车只给「{order_button.get('text')}」"
-                                          f"（直接用余额下单），不会出现{what}。要用{what}，请把付款方式改成余额支付，"
-                                          "或者先把余额用掉")
+                self.note(f"账户余额够付这一单：直接用余额下单，不用{what}")
             return f"余额（{order_button.get('text')}）", order_button
         topup = bool(TOPUP_PATH_RE.search(self.page.url or ""))
         if topup and mode == "balance":
@@ -2983,8 +2984,11 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
                 raise FlowError("failed", "商品价格和应付金额都没有识别出来，无法校验单笔上限，已停止。"
                                           "可在「选择器覆盖」里填写 price 或 total")
 
+        # 余额够付时网站只给「用余额下单」：后面按余额支付走（不进银行卡 / 币安页面）
+        pay_mode = "balance" if shop.balance_order_button else request.pay_mode
+        result.paid_by = pay_mode
         pay_frame, pay_button = None, None
-        if request.pay_mode == "card":
+        if pay_mode == "card":
             last4 = request.card.saved_last4
             if not shop.card_form_visible() and not shop.saved_card_option(last4)[1]:
                 # 结算页上没有卡表单：先进入支付网关。此时还没提交任何卡信息，不会扣款。
@@ -3023,13 +3027,14 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
         shop.note(f"找到付款按钮：{pay_button.get('text')}")
         if request.dry_run:
             shop.snap("dry-run")
-            raise FlowError("dry_run", f"演练模式：已到达付款前一步（付款按钮「{pay_button.get('text')}」），未付款")
-        if request.pay_mode != "card":
+            via = "（余额够付，会直接用余额下单）" if pay_mode != request.pay_mode else ""
+            raise FlowError("dry_run", f"演练模式：已到达付款前一步（付款按钮「{pay_button.get('text')}」）{via}，未付款")
+        if pay_mode != "card":
             shop.snap("before-pay")
         paid = True
         early_codes: List[str] = []
         early_url = ""
-        binance = request.pay_mode == "binance"
+        binance = pay_mode == "binance"
         if binance:
             outcome, detail, early_codes, early_url, user_paid = shop.submit_and_wait_binance(
                 pay_frame, pay_button, interaction, request.pay_timeout, request.known_codes, quantity)
