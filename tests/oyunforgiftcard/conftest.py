@@ -137,13 +137,15 @@ def oyun(site, monkeypatch):
     instance.init_plugin(make_config())
     set_secrets(instance, cookie=COOKIE)
     yield instance
+    instance.stop_warmup()
     wait_idle(instance, 60)
 
 
 def wait_idle(instance, timeout=120):
+    """等任务结束（包括快速下单预热的浏览器关掉）"""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if instance._job is None:
+        if instance._job is None and getattr(instance, "_warm", None) is None:
             return True
         time.sleep(0.3)
     return False

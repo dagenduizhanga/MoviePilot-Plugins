@@ -37,8 +37,8 @@ from .browser import add_cookies, launch_browser, playwright_proxy
 from .secure_page import (FIELDS, SECURITY_HEADERS, mask_value, render_error, render_form, render_result,
                           validate)
 from .shop import (BASE_URL, CATEGORY_PATH, CardInfo, Interaction, OyunforShop, PurchaseRequest, PurchaseResult,
-                   StepRecorder, check_account, load_overrides, mask_card_text, mask_code, parse_cookie,
-                   run_purchase)
+                   StepRecorder, check_account, load_overrides, mask_card_text, mask_code, parse_catalog, parse_cookie,
+                   run_purchase, warm_up)
 from .vault import ENV_NAME, MIN_SECRET_LENGTH, Vault, VaultError, generate_secret
 
 BASE_PLUGIN_ID = "Oyunfor" + "GiftCard"
@@ -50,6 +50,10 @@ FAST_PAUSE_SCALE = 0.3
 MENU_AMOUNTS = (100, 250, 500, 1000, 1250, 1500, 1750, 2000)
 # 确认购买的按钮多久后失效（秒），避免点到很久以前的旧按钮
 BUY_BUTTON_TTL = 600
+# 快速下单：点了面额后提前准备好的浏览器最多等多久（秒），等不到「购买」就关掉
+WARM_TTL = 180
+# 每天几点刷新一次各面额的商品编号（顺便刷新登录状态 / Cloudflare 验证）
+CATALOG_REFRESH_HOUR, CATALOG_REFRESH_MINUTE = 4, 10
 
 STATUS_TEXT = {
     "success": "购买成功",
@@ -102,6 +106,38 @@ class _Job:
         self.qr_token = secrets.token_hex(16)
         # 是否在等用户直接回复验证码（结束时要释放）
         self.text_input = False
+
+
+class _WarmSession:
+    """
+    快速下单的预热：用户点了面额后，提前启动浏览器、打开购物车、清空购物车。
+    浏览器只能在启动它的线程里用，所以这个线程自己等「购买」请求，等到了就在这里接着买，等不到就关掉。
+    """
+
+    def __init__(self, job: "_Job"):
+        self.job = job
+        self.inbox: "queue.Queue[PurchaseRequest]" = queue.Queue()
+        self.lock = threading.Lock()
+        self.state = "starting"   # starting / used / closed
+        self.cancel = threading.Event()
+
+    def hand_over(self, request: PurchaseRequest) -> bool:
+        """把购买请求交给预热好的浏览器；它已经关了就返回 False"""
+        with self.lock:
+            if self.state != "starting":
+                return False
+            self.state = "used"
+            self.inbox.put(request)
+            return True
+
+    def close(self) -> bool:
+        """不用了：还没被用上就标记关闭，返回 True"""
+        with self.lock:
+            if self.state != "starting":
+                return False
+            self.state = "closed"
+            self.cancel.set()
+            return True
 
 
 class _KnownCodes:
@@ -163,7 +199,7 @@ class OyunforGiftCard(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png"
     # 插件版本
-    plugin_version = "1.1.3"
+    plugin_version = "1.2.0"
     # 插件作者
     plugin_author = "dagenduizhanga"
     # 作者主页
@@ -180,6 +216,8 @@ class OyunforGiftCard(_PluginBase):
     # 测试时可置 0 跳过拟人等待
     _pause_scale = 1.0
     _fast_mode = True
+    _quick_mode = True
+    _warm: Optional[_WarmSession] = None
 
     # 配置（不含任何敏感信息）
     _enabled = False
@@ -237,6 +275,7 @@ class OyunforGiftCard(_PluginBase):
         self._nav_timeout = self._int(config.get("nav_timeout"), 60, 20, 300)
         self._clear_cart = bool(config.get("clear_cart", True))
         self._fast_mode = bool(config.get("fast_mode", True))
+        self._quick_mode = bool(config.get("quick_mode", True))
         self._show_code = bool(config.get("show_code", True))
         self._selectors = config.get("selectors") or ""
         self._keep_runs = self._int(config.get("keep_runs"), 10, 1, 100)
@@ -280,6 +319,7 @@ class OyunforGiftCard(_PluginBase):
             "daily_limit": self._daily_limit, "verify_timeout": self._verify_timeout, "cron": self._cron,
             "use_proxy": self._use_proxy, "proxy_url": self._proxy_url, "headless": self._headless,
             "nav_timeout": self._nav_timeout, "clear_cart": self._clear_cart, "fast_mode": self._fast_mode,
+            "quick_mode": self._quick_mode,
             "show_code": self._show_code,
             "selectors": self._selectors, "keep_runs": self._keep_runs, "history_days": self._history_days,
         }
@@ -691,29 +731,179 @@ class OyunforGiftCard(_PluginBase):
         dry_run = self._dry_run or force_dry
         if not dry_run and self._daily_limit and self.today_spent_count() >= self._daily_limit:
             return False, f"今天已经买了 {self._daily_limit} 次，达到每日上限"
-        if not self._lock.acquire(blocking=False):
-            return False, "已有任务在进行中，请稍后再试"
-        job = _Job("purchase", trigger, reply)
-        self._job = job
+        # 默认的 App Store 分类页和不填一样；快速下单：有这个面额保存好的商品编号就直接加入购物车
+        if product_url and product_url.rstrip("/") == DEFAULT_PRODUCT_URL:
+            product_url = ""
+        quick_item = (self._catalog_table().get(amount) if self._quick_mode and amount and not product_url
+                      else None)
         request = PurchaseRequest(amount=amount, product_url=product_url, quantity=quantity or self._quantity,
                                   pay_mode=self._pay_mode, dry_run=dry_run, max_total=self._max_total,
                                   verify_timeout=self._verify_timeout, pay_timeout=self._pay_timeout * 60,
-                                  pick_amount=config_amount,
+                                  pick_amount=config_amount, quick_item=quick_item,
                                   known_codes=_KnownCodes(self._vault, self.get_data("known_fp") or []))
+        warm = self._warm
+        if warm is not None:
+            # 点面额时已经在预热：把请求交给那个浏览器（同一个线程里接着买）
+            warm.job.reply = dict(reply or {})
+            warm.job.trigger = trigger
+            if warm.hand_over(request):
+                self._job = warm.job
+                return True, self._start_message(amount, product_url, request, dry_run)
+            # 预热的浏览器正在关：等它把锁放掉
+            acquired = self._lock.acquire(timeout=15)
+        else:
+            acquired = self._lock.acquire(blocking=False)
+        if not acquired:
+            return False, "已有任务在进行中，请稍后再试"
+        job = _Job("purchase", trigger, reply)
+        self._job = job
         thread = threading.Thread(target=self._purchase_worker, args=(job, request), daemon=True,
                                   name=f"oyunfor-{job.id}")
         thread.start()
+        return True, self._start_message(amount, product_url, request, dry_run)
+
+    def _start_message(self, amount: Optional[int], product_url: str, request: PurchaseRequest,
+                       dry_run: bool) -> str:
         shown_url = "" if product_url.rstrip("/") == DEFAULT_PRODUCT_URL else product_url
         target = (f"{amount} TL（{shown_url}）" if amount and shown_url else shown_url or f"{amount} TL")
         what = "演练" if dry_run else "购买"
-        return True, f"开始{what}：{target} × {request.quantity}（{PAY_MODE_SHORT[self._pay_mode]}）"
+        return f"开始{what}：{target} × {request.quantity}（{PAY_MODE_SHORT[self._pay_mode]}）"
+
+    # ------------------------------------------------------------------ 快速下单：商品编号与预热
+    def _catalog_table(self) -> Dict[int, Dict[str, Any]]:
+        """保存好的各面额商品编号：{面额: {"id", "type", "price", "title"}}"""
+        return parse_catalog((self.get_data("catalog") or {}).get("items") or [])
+
+    def _save_catalog(self, items: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+        table = parse_catalog(items)
+        if table:
+            keep = [item for item in items if str(item.get("id")) in {v["id"] for v in table.values()}]
+            self.save_data("catalog", {"time": self._now_str(), "items": keep})
+        return table
+
+    def refresh_catalog(self):
+        """每天凌晨：打开一次礼品卡分类页，刷新各面额的商品编号，顺便刷新登录状态 / Cloudflare 验证"""
+        if self._lock is None:
+            self._lock = threading.Lock()
+        if not self._vault or not self._vault.ready:
+            return
+        meta = self._secret_meta()
+        if "cookie" not in meta and not ("username" in meta and "password" in meta):
+            return
+        if not self._lock.acquire(blocking=False):
+            logger.info("Oyunfor：正在执行其他任务，跳过这次商品编号刷新")
+            return
+        threading.Thread(target=self._catalog_worker, daemon=True, name="oyunfor-catalog").start()
+
+    def _catalog_worker(self):
+        recorder = StepRecorder(None, lambda text: logger.info(f"Oyunfor：{text}"))
+        creds: Dict[str, str] = {}
+        closer = None
+        try:
+            creds = self.read_secrets()
+            context, closer, shop = self._open_session(recorder, creds)
+            shop.goto(CATEGORY_PATH, "礼品卡分类页")
+            logged = shop.is_logged_in()
+            shop.wait_products()
+            table = self._save_catalog(shop.read_catalog())
+            if table:
+                recorder.note("商品编号已刷新：" + "、".join(f"{face} TL" for face in sorted(table)))
+            else:
+                recorder.note("分类页上没读到商品编号，保留上次保存的")
+            if logged is not False:
+                self._save_state(context, keep=True)
+        except Exception as err:  # noqa
+            logger.warning(f"Oyunfor：刷新商品编号失败 - {type(err).__name__}: {str(err)[:160]}")
+        finally:
+            creds = {}
+            if closer:
+                try:
+                    closer()
+                except Exception:  # noqa
+                    pass
+            self._lock.release()
+
+    def start_warmup(self, reply: Optional[dict]):
+        """机器人里点了面额：提前启动浏览器、打开购物车并清空，等用户点「购买」"""
+        if not self._quick_mode or self._warm is not None or self._job is not None:
+            return
+        if not self._vault or not self._vault.ready:
+            return
+        meta = self._secret_meta()
+        if "cookie" not in meta and not ("username" in meta and "password" in meta):
+            return
+        if self._lock is None:
+            self._lock = threading.Lock()
+        if not self._lock.acquire(blocking=False):
+            return
+        warm = _WarmSession(_Job("purchase", "按钮", reply))
+        self._warm = warm
+        threading.Thread(target=self._warm_worker, args=(warm,), daemon=True,
+                         name=f"oyunfor-warm-{warm.job.id}").start()
+
+    def stop_warmup(self):
+        warm = self._warm
+        if warm is not None:
+            warm.close()
+
+    def _warm_worker(self, warm: _WarmSession):
+        job = warm.job
+        recorder = self._make_recorder(job)
+        creds: Dict[str, str] = {}
+        context = closer = shop = None
+        prepared = None
+        try:
+            recorder.note("快速下单：你选了面额，提前启动浏览器、打开购物车")
+            creds = self.read_secrets()
+            context, closer, shop = self._open_session(recorder, creds)
+            if not warm.cancel.is_set():
+                prepared = warm_up(shop, clear_cart=self._clear_cart)
+        except Exception as err:  # noqa
+            recorder.note(f"预热没成功（不影响购买，购买时会重新打开）：{type(err).__name__}: {str(err)[:120]}")
+            prepared = None
+        request = None
+        deadline = time.time() + WARM_TTL
+        while request is None and time.time() < deadline and not warm.cancel.is_set():
+            try:
+                request = warm.inbox.get(timeout=0.5)
+            except queue.Empty:
+                continue
+        if request is None:
+            with warm.lock:
+                if warm.state == "used":
+                    # 正好在关的时候点了「购买」（请求在锁里放进来的）：用上
+                    request = warm.inbox.get_nowait()
+                else:
+                    warm.state = "closed"
+        if request is None:
+            if closer:
+                try:
+                    closer()
+                except Exception:  # noqa
+                    pass
+            creds = {}
+            self._warm = None
+            shutil.rmtree(self.get_data_path() / "runs" / job.id, ignore_errors=True)
+            logger.info("Oyunfor：预热的浏览器没用上，已关闭")
+            self._lock.release()
+            return
+        self._warm = None
+        session = {"recorder": recorder, "creds": creds, "prepared": prepared,
+                   "context": context, "closer": closer, "shop": shop}
+        self._purchase_worker(job, request, session=session)
 
     def start_check(self, reply: Optional[dict] = None) -> Tuple[bool, str]:
         if self._lock is None:
             self._lock = threading.Lock()
         if not self._vault or not self._vault.ready:
             return False, f"请先设置环境变量 {ENV_NAME}"
-        if not self._lock.acquire(blocking=False):
+        if self._warm is not None:
+            # 还没用上的预热浏览器：关掉再查
+            self.stop_warmup()
+            acquired = self._lock.acquire(timeout=15)
+        else:
+            acquired = self._lock.acquire(blocking=False)
+        if not acquired:
             return False, "已有任务在进行中，请稍后再试"
         job = _Job("check", "手动", reply)
         self._job = job
@@ -777,9 +967,13 @@ class OyunforGiftCard(_PluginBase):
             return creds["username"], creds["password"]
         return None
 
-    def _purchase_worker(self, job: _Job, request: PurchaseRequest):
+    def _purchase_worker(self, job: _Job, request: PurchaseRequest, session: Optional[Dict[str, Any]] = None):
+        """
+        :param session: 快速下单预热好的浏览器（同一个线程里启动的）：直接用，不再启动、不再清空购物车
+        """
         result: Optional[PurchaseResult] = None
-        recorder = self._make_recorder(job)
+        session = session or {}
+        recorder = session.get("recorder") or self._make_recorder(job)
         try:
             what = "演练" if request.dry_run else "购买"
             target = (f"{request.amount} TL" if request.amount and (
@@ -793,19 +987,26 @@ class OyunforGiftCard(_PluginBase):
                 self.send(job.reply, f"【Oyunfor 开始{what}】", f"{target} × {request.quantity}",
                           buttons=cancel if edit else None, edit=edit)
             # 敏感信息只在这里解密，任务结束即丢弃
-            creds = self.read_secrets()
+            creds = session.get("creds") or self.read_secrets()
             request.card = CardInfo(number=creds.get("card_number", ""), holder=creds.get("card_holder", ""),
                                     expiry=creds.get("card_expiry", ""), cvv=creds.get("card_cvv", ""),
                                     use_saved=True)
             context = closer = None
             try:
                 # Playwright 同步接口不能运行在带事件循环的线程里：这里是独立线程
-                context, closer, shop = self._open_session(recorder, creds)
+                if session.get("shop") is not None:
+                    context, closer, shop = session["context"], session["closer"], session["shop"]
+                else:
+                    context, closer, shop = self._open_session(recorder, creds)
                 result = run_purchase(shop, request, _PluginInteraction(self, job), login=self._login_of(creds),
-                                      clear_cart=self._clear_cart)
+                                      clear_cart=self._clear_cart, prepared=session.get("prepared"))
+                if shop.catalog_seen:
+                    # 打开过分类页：顺手把各面额的商品编号存下来，下次直接加入购物车
+                    self._save_catalog(shop.catalog_seen)
                 self._save_state(context, keep=result.status != "login_required")
             finally:
                 creds = {}
+                session.clear()
                 request.card = CardInfo()
                 if closer:
                     try:
@@ -1031,6 +1232,7 @@ class OyunforGiftCard(_PluginBase):
             self.send_amount_menu(reply, edit=edit)
             return True
         if text == "nobuy":
+            self.stop_warmup()
             again = [[{"text": "🔄 重新选面额", "callback_data": f"[PLUGIN]{plugin_id}|menu"}]]
             self.send(reply, "【Oyunfor】", "好的，不买了", buttons=again, force=True, save_history=False, edit=edit)
             return True
@@ -1043,6 +1245,8 @@ class OyunforGiftCard(_PluginBase):
             return True
         if action == "pick":
             self.send_buy_confirm(reply, amount, quantity, edit=edit)
+            # 快速下单：用户多半要买了，趁他确认的这几秒提前打开浏览器、清空购物车
+            self.start_warmup(reply)
             return True
         if not stamp or time.time() - int(stamp, 16) > BUY_BUTTON_TTL:
             self.send_amount_menu(reply, edit=edit, notice="⌛ 刚才的按钮已过期，请重新选择面额")
@@ -1256,20 +1460,30 @@ class OyunforGiftCard(_PluginBase):
                                  "Cache-Control": "no-store"})
 
     def get_service(self) -> List[Dict[str, Any]]:
-        if not self._enabled or not self._cron:
+        if not self._enabled:
             return []
-        try:
-            trigger = CronTrigger.from_crontab(self._cron)
-        except Exception as err:
-            logger.error(f"Oyunfor：定时购买周期 {self._cron} 无效 - {err}")
-            return []
-        return [{
-            "id": self.__class__.__name__,
-            "name": f"{self.plugin_name}（定时）",
-            "trigger": trigger,
-            "func": self.run_scheduled,
-            "kwargs": {},
-        }]
+        services: List[Dict[str, Any]] = []
+        if self._cron:
+            try:
+                services.append({
+                    "id": self.__class__.__name__,
+                    "name": f"{self.plugin_name}（定时）",
+                    "trigger": CronTrigger.from_crontab(self._cron),
+                    "func": self.run_scheduled,
+                    "kwargs": {},
+                })
+            except Exception as err:
+                logger.error(f"Oyunfor：定时购买周期 {self._cron} 无效 - {err}")
+        if self._quick_mode:
+            # 快速下单：每天凌晨刷新一次各面额的商品编号
+            services.append({
+                "id": f"{self.__class__.__name__}Catalog",
+                "name": f"{self.plugin_name}（刷新商品编号）",
+                "trigger": CronTrigger(hour=CATALOG_REFRESH_HOUR, minute=CATALOG_REFRESH_MINUTE),
+                "func": self.refresh_catalog,
+                "kwargs": {},
+            })
+        return services
 
     def run_scheduled(self):
         ok, message = self.start_purchase(trigger="定时")
@@ -1343,6 +1557,9 @@ class OyunforGiftCard(_PluginBase):
             ]},
             {"component": "VRow", "content": [
                 hint(3, "VSwitch", "点击之间的停顿缩短到约 30%；遇到网站拦截再关掉", model="fast_mode", label="快速模式"),
+                hint(9, "VSwitch", "用保存的商品编号直接加入购物车（不打开商品列表）；在机器人里点面额时就提前打开浏览器、"
+                                   f"清空购物车；每天 {CATALOG_REFRESH_HOUR:02d}:{CATALOG_REFRESH_MINUTE:02d} 刷新商品编号。"
+                                   "对不上时自动改回老办法", model="quick_mode", label="快速下单"),
             ]},
             {"component": "VRow", "content": [
                 hint(12, "VTextarea", "页面结构与预期不同时使用，键名见插件说明", model="selectors",
@@ -1386,7 +1603,8 @@ class OyunforGiftCard(_PluginBase):
             "product_url": DEFAULT_PRODUCT_URL, "max_total": 2000, "daily_limit": 3, "cron": "",
             "verify_timeout": 300, "pay_timeout": 15, "nav_timeout": 60,
             "use_proxy": False, "proxy_url": "",
-            "headless": False, "clear_cart": True, "fast_mode": True, "show_code": True, "keep_runs": 10,
+            "headless": False, "clear_cart": True, "fast_mode": True, "quick_mode": True, "show_code": True,
+            "keep_runs": 10,
             "selectors": "", "history_days": 180,
         }
         return form, model
@@ -1479,5 +1697,5 @@ class OyunforGiftCard(_PluginBase):
         return blocks
 
     def stop_service(self):
-        # 正在等待验证的任务不在这里中断：保存配置也会调用到这里
-        pass
+        # 正在等待验证的任务不在这里中断：保存配置也会调用到这里；只关掉还没用上的预热浏览器
+        self.stop_warmup()

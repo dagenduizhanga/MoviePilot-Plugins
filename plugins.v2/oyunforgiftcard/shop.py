@@ -619,6 +619,70 @@ JS_PRODUCT_CARDS = "() => {" + _JS_FOLD + r"""
 """
 
 # 列表页的「DETAY」链接（认不出加入购物车按钮时，退而打开对应商品的详情页）
+# 分类页上每张卡片「SEPETE EKLE」按钮带的商品信息（Oyunfor：div.addToCart[data-id][data-type][data-price][data-name]）
+JS_CATALOG = r"""
+() => {
+    const out = [], seen = {};
+    for (const b of document.querySelectorAll('.addToCart[data-id], [data-id][data-type][data-name]')) {
+        const id = (b.getAttribute('data-id') || '').trim();
+        const name = (b.getAttribute('data-name') || '').trim();
+        if (!id || !name || seen[id]) continue;
+        seen[id] = 1;
+        out.push({id, name, type: (b.getAttribute('data-type') || '1').trim(), price: b.getAttribute('data-price') || '',
+                  options: (b.getAttribute('data-options') || '[]').trim()});
+    }
+    return out;
+}
+"""
+
+# 和网站「SEPETE EKLE」发的一模一样的请求：表单格式 POST basket/addBasket（网站自己也不带 csrf）
+JS_ADD_BASKET = r"""
+async ([id, type, count]) => {
+    const base = (typeof site_url === 'string' && site_url) ? site_url : (location.origin + '/');
+    const body = new URLSearchParams({productID: id, productType: type, secenekler: '', counts: String(count),
+                                      tutar: '0', optionsc: '', sideProductId: '0'});
+    try {
+        const r = await fetch(base + 'basket/addBasket', {method: 'POST', credentials: 'same-origin',
+            headers: {'Content-type': 'application/x-www-form-urlencoded'}, body: body.toString()});
+        const text = await r.text();
+        if (r.status !== 200) return {ok: false, error: 'HTTP ' + r.status};
+        let j = null;
+        try { j = JSON.parse(text); } catch (e) { return {ok: false, error: '返回的不是 JSON：' + text.slice(0, 80)}; }
+        if (j && !Array.isArray(j) && (j.msg || j.limitmsg)) return {ok: false, error: String(j.msg || j.limitmsg).slice(0, 160)};
+        if (j && !Array.isArray(j) && (j.tokenref || j.yonlendir)) return {ok: false, error: '网站要求刷新页面或登录'};
+        return {ok: true};
+    } catch (e) {
+        return {ok: false, error: String(e).slice(0, 160)};
+    }
+}
+"""
+
+
+def parse_catalog(items: Iterable[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    """
+    从分类页读到的商品信息里挑出固定面额的 App Store 卡：{面额: {"id", "type", "price", "title"}}。
+    「100 - 2000 TL」这种自定义金额的、需要填选项的、不是 App Store 的都不要。
+    """
+    table: Dict[int, Dict[str, Any]] = {}
+    for item in items or []:
+        name = str(item.get("name") or item.get("title") or "").strip()
+        low = fold(name)
+        if not re.search(r"(app ?store|itunes|apple)", low):
+            continue
+        if re.search(r"\d\s*-\s*\d", low):
+            continue
+        if str(item.get("options") or "[]").strip() not in ("", "[]"):
+            continue
+        match = re.match(r"^\s*(\d{2,5})\s*(tl|try|₺)\b", low)
+        if not match or not str(item.get("id") or "").strip():
+            continue
+        face = int(match.group(1))
+        price = parse_number(str(item.get("price") or ""))
+        table[face] = {"id": str(item["id"]).strip(), "type": str(item.get("type") or "1").strip() or "1",
+                       "price": price, "title": name}
+    return table
+
+
 JS_DETAIL_LINKS = "() => {" + _JS_FOLD + r"""
     const links = Array.from(document.querySelectorAll('a[href]')).filter(a => visible(a)
         && /^(detay|detaylar|detail|details|incele|urunu incele)$/.test(label(a.innerText || a.getAttribute('title') || '')));
@@ -829,6 +893,8 @@ class PurchaseRequest:
     known_codes: Sequence[str] = ()
     pay_timeout: int = 900
     pick_amount: Optional[int] = None
+    # 保存好的商品编号（直接加入购物车，不打开商品列表页）：{"id", "type", "price", "title"}
+    quick_item: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -1005,6 +1071,8 @@ class OyunforShop:
         # Oyunfor 购物车：余额够时的「Alışverişi Tamamla」（点了就用余额下单）；进补差额页前读到的购物车总额
         self.balance_order_button: Optional[Dict[str, Any]] = None
         self.cart_total: Optional[float] = None
+        # 这次打开分类页时读到的商品编号（插件存下来，下次直接加入购物车用）
+        self.catalog_seen: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------ 基础
     def note(self, text: str):
@@ -1400,6 +1468,57 @@ class OyunforShop:
             return []
         return [card for card in cards if isinstance(card, dict)]
 
+    def read_catalog(self) -> List[Dict[str, Any]]:
+        """读当前分类页上每张卡片的商品编号、价格（读不到返回空列表）"""
+        try:
+            items = self.page.evaluate(JS_CATALOG) or []
+        except Exception:  # noqa
+            return []
+        return [item for item in items if isinstance(item, dict)]
+
+    def add_by_id(self, item: Dict[str, Any], quantity: int) -> str:
+        """用商品编号直接加入购物车（和网站按钮发的请求一样）。成功返回空串，失败返回原因"""
+        try:
+            result = self.page.evaluate(JS_ADD_BASKET, [str(item["id"]), str(item.get("type") or "1"),
+                                                        max(1, int(quantity))])
+        except Exception as err:  # noqa
+            return f"{type(err).__name__}: {str(err)[:120]}"
+        if isinstance(result, dict) and result.get("ok"):
+            return ""
+        return str((result or {}).get("error") or "未知原因") if isinstance(result, dict) else "未知原因"
+
+    def quick_add(self, item: Dict[str, Any], quantity: int) -> bool:
+        """
+        用保存好的商品编号直接加入购物车，再打开购物车核对（商品名、总额都对得上才算）。
+        对不上就清空购物车，返回 False，由调用方改走打开商品列表的老办法。
+        """
+        title = str(item.get("title") or "")
+        self.note(f"用保存的商品编号直接加入购物车：{title}（编号 {item.get('id')}）× {quantity}")
+        error = self.add_by_id(item, quantity)
+        if error and any(re.search(p, fold(error)) for p in OUT_OF_STOCK_TEXT + [r"stok"]):
+            raise FlowError("out_of_stock", f"商品缺货（网站提示：{error}）")
+        if error:
+            self.note(f"直接加入购物车没成功（{error}），改为打开商品列表")
+            return False
+        self.goto(self.overrides.get("cart_url") or OYUNFOR_CART_PATH, "购物车")
+        text = fold(self.page_text().get("text"))
+        total = self.read_total()
+        price = item.get("price")
+        expected = price * quantity if isinstance(price, (int, float)) else None
+        face = re.match(r"\s*(\d{2,5})", title)
+        named = bool(title) and (fold(title) in text or bool(face and amount_pattern(int(face.group(1))).search(text)
+                                                              and re.search(r"(app ?store|itunes)", text)))
+        if expected is not None and total is not None:
+            ok = named and abs(total - expected) <= 1.0
+        else:
+            ok = bool(title) and fold(title) in text
+        if not ok:
+            self.note(f"购物车里的商品或总额和保存的对不上（总额 {total}，应为 {expected}），清空后改为打开商品列表")
+            self.clear_cart()
+            return False
+        self.snap("cart")
+        return True
+
     def resolve_product(self, amount: Optional[int], product_url: str = "",
                         pick_amount: Optional[int] = None) -> Product:
         """
@@ -1413,6 +1532,7 @@ class OyunforShop:
         url = product_url or self.overrides.get("category_url") or CATEGORY_PATH
         self.goto(url, "商品页" if product_url else "礼品卡分类页")
         cards = self.wait_products()
+        self.catalog_seen = self.read_catalog()
         self.snap("listing" if len(cards) >= 2 else "product-page")
         if cards:
             self.note(f"页面上有 {len(cards)} 个商品：" + "；".join(card.get("title", "")[:40] for card in cards[:8]))
@@ -1723,8 +1843,11 @@ class OyunforShop:
             raise FlowError("failed", f"点击「{text}」失败。" + self.page_summary())
         self.settle()
 
-    def start_checkout(self, quantity: int, dry_run: bool = False) -> None:
-        """商品页 → （购物车）→ 结算页"""
+    def start_checkout(self, quantity: int, dry_run: bool = False, in_cart: bool = False) -> None:
+        """商品页 → （购物车）→ 结算页。in_cart：商品已经直接加进购物车、现在就在购物车页"""
+        if in_cart:
+            self._to_checkout(quantity, dry_run)
+            return
         if getattr(self, "chosen_card", None):
             self._add_from_listing(quantity)
         else:
@@ -1757,6 +1880,10 @@ class OyunforShop:
             else:
                 self.open_cart()
             self.pause()
+        self._to_checkout(quantity, dry_run)
+
+    def _to_checkout(self, quantity: int, dry_run: bool) -> None:
+        """购物车页 → 结算页（补差额付款页 / 余额下单按钮）"""
         # 购物车页：继续到结算
         self.balance_order_button = None
         self.cart_total = None
@@ -2752,18 +2879,52 @@ class OyunforShop:
 
 
 # ---------------------------------------------------------------- 整体流程
+def warm_up(shop: OyunforShop, clear_cart: bool = True) -> Optional[Dict[str, Any]]:
+    """
+    预热：打开购物车页、确认已登录、读余额、清空购物车（不需要用户输入的部分）。
+    成功返回 {"balance": ...}，交给 run_purchase(prepared=...)；没登录等情况返回 None（正式购买时再处理）
+    """
+    shop.goto(shop.overrides.get("cart_url") or OYUNFOR_CART_PATH, "购物车")
+    if shop.is_logged_in() is False:
+        shop.note("预热：页面显示未登录，留给正式购买时处理")
+        return None
+    balance = shop.read_balance()
+    if clear_cart:
+        shop.clear_cart()
+    shop.note("预热完成：浏览器、登录、购物车都准备好了")
+    return {"balance": balance, "at": time.time()}
+
+
+def _check_product_limits(product: Product, quantity: int, request: PurchaseRequest, balance: Optional[float]):
+    if product.in_stock is False:
+        raise FlowError("out_of_stock", "商品缺货")
+    if product.price is not None and request.max_total and product.price * quantity > request.max_total + 0.01:
+        raise FlowError("limit", f"商品价格 {product.price:.2f} TL × {quantity} 超过单笔上限 {request.max_total:.2f} TL")
+    if (request.pay_mode == "balance" and balance is not None and product.price is not None
+            and balance + 0.01 < product.price * quantity):
+        raise FlowError("insufficient", f"余额 {balance:.2f} TL 不足以支付 {product.price * quantity:.2f} TL")
+
+
 def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Interaction,
-                 login: Optional[Tuple[str, str]] = None, clear_cart: bool = True) -> PurchaseResult:
-    """执行一次购买（或演练）"""
+                 login: Optional[Tuple[str, str]] = None, clear_cart: bool = True,
+                 prepared: Optional[Dict[str, Any]] = None) -> PurchaseResult:
+    """
+    执行一次购买（或演练）
+    :param prepared: warm_up() 的结果：浏览器已经在购物车页、登录过、购物车已清空，跳过这几步
+    """
     result = PurchaseResult(status="failed", message="")
     paid = False
     try:
+        if prepared is not None and not CART_PATH_RE.search(urlparse(shop.page.url or "").path):
+            prepared = None
+        if prepared is not None:
+            shop.note(f"用预热好的浏览器（{time.time() - prepared.get('at', time.time()):.0f} 秒前已打开购物车并清空）")
         # 要清空购物车时直接从购物车页开始（页头一样能看登录状态和余额），省掉打开首页这一步
-        if clear_cart:
+        elif clear_cart:
             shop.goto(shop.overrides.get("cart_url") or OYUNFOR_CART_PATH, "购物车")
         else:
             shop.goto("/", "首页")
-        logged = shop.is_logged_in()
+        logged = True if prepared is not None else shop.is_logged_in()
         shop.snap("home")
         if logged is False:
             if login and login[0] and login[1]:
@@ -2776,25 +2937,31 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
                 raise FlowError("login_required", "Cookie 已失效（页面显示未登录），请重新复制 Cookie")
         elif logged is None:
             shop.note("无法确认登录状态，继续")
-        result.balance = shop.read_balance()
+        result.balance = prepared.get("balance") if prepared is not None else shop.read_balance()
         if result.balance is not None:
             shop.note(f"账户余额：{result.balance:.2f} TL")
-        if clear_cart:
+        if clear_cart and prepared is None:
             shop.clear_cart()
 
-        product = shop.resolve_product(request.amount, request.product_url, request.pick_amount)
-        result.product = product
-        shop.snap("product")
-        if product.in_stock is False:
-            raise FlowError("out_of_stock", "商品缺货")
         quantity = max(1, int(request.quantity or 1))
-        if product.price is not None and request.max_total and product.price * quantity > request.max_total + 0.01:
-            raise FlowError("limit", f"商品价格 {product.price:.2f} TL × {quantity} 超过单笔上限 {request.max_total:.2f} TL")
-        if (request.pay_mode == "balance" and result.balance is not None and product.price is not None
-                and result.balance + 0.01 < product.price * quantity):
-            raise FlowError("insufficient", f"余额 {result.balance:.2f} TL 不足以支付 {product.price * quantity:.2f} TL")
+        in_cart = False
+        product = None
+        item = request.quick_item
+        if item and not request.product_url and clear_cart:
+            # 快速下单：用保存的商品编号直接加入购物车，不打开商品列表页；对不上就退回老办法
+            product = Product(url=CATEGORY_PATH, title=str(item.get("title") or ""), face_value=request.amount,
+                              price=item.get("price") if isinstance(item.get("price"), (int, float)) else None)
+            _check_product_limits(product, quantity, request, result.balance)
+            in_cart = shop.quick_add(item, quantity)
+            if not in_cart:
+                product = None
+        if product is None:
+            product = shop.resolve_product(request.amount, request.product_url, request.pick_amount)
+            shop.snap("product")
+            _check_product_limits(product, quantity, request, result.balance)
+        result.product = product
 
-        shop.start_checkout(quantity, dry_run=request.dry_run)
+        shop.start_checkout(quantity, dry_run=request.dry_run, in_cart=in_cart)
         option, option_button = shop.select_payment(request.pay_mode)
         shop.note(f"付款方式：{option}")
         shop.tick_agreements()

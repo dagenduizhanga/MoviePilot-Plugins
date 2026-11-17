@@ -31,6 +31,8 @@ PRODUCTS = {
              "title": "2000 TL Tutarında App Store & iTunes Hediye Kartı", "price": 2050.0},
 }
 CATEGORY = "/apple-store/apple-store-itunes-gift-card"
+# 真实站点每个面额都有固定的商品编号（data-id），「SEPETE EKLE」就是用它 POST /basket/addBasket
+PRODUCT_IDS = {"custom": "10161", "100": "10159", "250": "10160", "2500": "19990", "1000": "11812"}
 # 仿 Cloudflare 520 错误页（源服务器返回了异常响应）
 CF_520_PAGE = """<!doctype html><html lang="en-US"><head><meta charset="utf-8">
 <title>oyunfor.com | 520: Web server is returning an unknown error</title></head><body>
@@ -63,7 +65,7 @@ def _default_state():
         "cf_error_path": CATEGORY,      # 这个地址接下来 cf_error_left 次返回 Cloudflare 520 错误页
         "cf_error_left": 0,
         "balance_label": "Bakiye ile Öde",
-        "listing_style": "plain",      # plain / ajax / nobuttons / empty
+        "listing_style": "plain",      # plain / ajax / nobuttons / empty / oyunfor（真实写法：div.addToCart + data-id）
         "binance_mode": "onsite",      # onsite / hosted
         "binance_autoredirect": True,
         "binance_paid": [],
@@ -334,6 +336,27 @@ class Handler(BaseHTTPRequestHandler):
             if data.get("from") == "liste":
                 return self.redirect(f"{CATEGORY}?added=1")
             return self.redirect(f"{CATEGORY}/{PRODUCTS[product]['slug']}?added=1")
+        if path == "/basket/addBasket":
+            # 和真实站点一样：表单格式、不要 csrf；出错返回 {msg}，成功返回购物车里的商品列表
+            pid = data.get("productID") or ""
+            key = next((k for k, v in PRODUCT_IDS.items() if v == pid), None)
+            with LOCK:
+                stock = STATE["stock"]
+                if not key:
+                    return self.send_json({"msg": "Ürün bulunamadı"})
+                if not stock:
+                    return self.send_json({"msg": "Ürün stokta bulunmamaktadır"})
+                qty = max(1, int(data.get("counts") or 1))
+                item = {"product": key, "qty": qty}
+                if key == "custom":
+                    try:
+                        item["price"] = float(data.get("tutar") or 0)
+                    except ValueError:
+                        item["price"] = 0.0
+                STATE["cart"].append(item)
+                items = [{"productID": PRODUCT_IDS[i["product"]], "productName": PRODUCTS[i["product"]]["listing"],
+                          "countP": i["qty"]} for i in STATE["cart"]]
+            return self.send_json(items)
         if path == "/sepet/adet":
             idx = int(data.get("index") or 0)
             with LOCK:
@@ -443,6 +466,8 @@ class Handler(BaseHTTPRequestHandler):
             style = STATE["listing_style"]
         if style == "ajax":
             return self.category_page_ajax()
+        if style == "oyunfor":
+            return self.category_page_oyunfor()
         cards = []
         for key, p in PRODUCTS.items():
             detail = f'<a href="{CATEGORY}/{p["slug"]}" class="btn btn-outline">ℹ DETAY</a>'
@@ -464,6 +489,35 @@ class Handler(BaseHTTPRequestHandler):
         toast = '<div class="toast">Ürün sepete eklendi.</div>' if added else ""
         err = '<div class="alert">Lütfen 100 - 2000 TL arasında bir tutar giriniz.</div>' if error else ""
         return self.page("Apple Store", f"<h1>Apple Store</h1>{toast}{err}<div class='product-list'>{''.join(cards)}</div>")
+
+    def category_page_oyunfor(self):
+        """仿真实分类页：每张卡片的「SEPETE EKLE」是 div.button.addToCart，带 data-id / data-type / data-price / data-name；
+        点了用表单格式 POST /basket/addBasket（不带 csrf），成功后跳到购物车"""
+        with LOCK:
+            cart_path, stock = STATE["cart_path"], STATE["stock"]
+        cards = []
+        for key, p in PRODUCTS.items():
+            if not stock:
+                cards.append(f"""<div class="product-item"><h3 class="name">{html.escape(p["listing"])}</h3>
+<div class="price">{p["price"]:.2f} TL</div><span class="badge">Stokta Yok</span></div>""")
+                continue
+            inputs = ('<input class="itunesInput itunesTL desktop" placeholder="Tutar giriniz."> . '
+                      '<input class="itunesInput itunesKURUS desktop" maxlength="2">') if key == "custom" else ""
+            price = 250.0 if key == "custom" else p["price"]
+            cards.append(f"""<div class="product-item"><h3 class="name">{html.escape(p["listing"])}</h3>
+<div class="price">{price:.2f} TL</div>{inputs}<a class="button" href="{CATEGORY}/{p["slug"]}">DETAY</a>
+<div class="button addToCart desktop" data-id="{PRODUCT_IDS[key]}" data-type="1" data-price="{price:.2f}" data-options="[]"
+ data-name="{html.escape(p["listing"])}"><i class="fas fa-cart-plus"></i> SEPETE EKLE</div></div>""")
+        script = """<script>
+document.querySelectorAll('.addToCart').forEach(b => b.addEventListener('click', () => {
+  let tutar = 0;
+  if (b.dataset.id === '10161') tutar = (document.querySelector('.itunesTL').value || '0') + '.' + (document.querySelector('.itunesKURUS').value || '0');
+  const body = new URLSearchParams({productID: b.dataset.id, productType: b.dataset.type, secenekler: '', counts: '1', tutar: String(tutar), optionsc: '', sideProductId: '0'});
+  fetch('/basket/addBasket', {method: 'POST', headers: {'Content-type': 'application/x-www-form-urlencoded'}, body: body.toString()})
+    .then(r => r.json()).then(r => { if (r.msg || r.limitmsg) alert(r.msg || r.limitmsg); else location.href = CART_PATH; });
+}));
+</script>""".replace("CART_PATH", json.dumps(cart_path))
+        return self.page("App Store Hediye Kartı Satın Al", f"<h1>App Store Card</h1><div class='list'>{''.join(cards)}</div>{script}")
 
     def category_page_ajax(self):
         """商品列表由脚本在页面加载后渲染；加入购物车是 div 做的按钮（带图标字体字符），用 fetch 提交"""

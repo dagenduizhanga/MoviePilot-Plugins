@@ -881,3 +881,96 @@ def test_code_lookup_opens_purchases_page_directly(oyun, site):
     paid_at = max(i for i, e in enumerate(log) if e["method"] == "POST" and e["path"] == "/odeme")
     pages = [e["path"] for e in log[paid_at:] if e["method"] == "GET"]
     assert "/profil/aldiklarim" in pages and "/" not in pages, pages
+
+
+
+# ---------------------------------------------------------------- 快速下单：保存的商品编号、预热
+def _real_listing(site, **extra):
+    """仿真实分类页：div.addToCart 带 data-id，加入购物车是 POST /basket/addBasket"""
+    site.set(listing_style="oyunfor", cart_path="/sepetim", header_cart="icon", cart_row_style="real", **extra)
+
+
+def _pick_and_buy(oyun, amount, wait=0.0):
+    oyun.handle_button(_button(f"pick:{amount}:1"))
+    confirm = oyun.messages[-1]
+    if wait:
+        time.sleep(wait)
+    go = [c for c in _callbacks(confirm) if c.startswith(f"buy:{amount}:1:") or c.startswith(f"dry:{amount}:1:")][0]
+    oyun.handle_button(_button(go))
+    assert wait_idle(oyun, 150)
+    return oyun.get_data("history")[-1]
+
+
+def test_quick_buy_learns_ids_then_skips_list_page(oyun, site, monkeypatch):
+    """第一次买时从分类页记下各面额的商品编号；之后点面额就预热浏览器，点「购买」直接用编号加入购物车，不再打开分类页"""
+    import app.plugins.oyunforgiftcard as plugin_module
+
+    launches = []
+    real_launch = plugin_module.launch_browser
+
+    def counting_launch(*args, **kwargs):
+        launches.append(1)
+        return real_launch(*args, **kwargs)
+
+    monkeypatch.setattr(plugin_module, "launch_browser", counting_launch)
+    _real_listing(site)
+    record = _pick_and_buy(oyun, 250)
+    assert record["code"] == "success", record
+    table = oyun._catalog_table()
+    assert table[250]["id"] == "10160" and table[100]["id"] == "10159", table
+
+    site.reset()
+    _real_listing(site)
+    oyun.del_data("known_fp")
+    launches.clear()
+    record = _pick_and_buy(oyun, 250, wait=3)
+    assert record["code"] == "success", record
+    assert len(launches) == 1, "预热的浏览器应该直接拿来用"
+    gets = [e["path"] for e in site.state()["log"] if e["method"] == "GET"]
+    assert CATEGORY not in gets, gets
+    assert site.posts("/basket/addBasket")
+
+
+def test_quick_buy_wrong_saved_id_falls_back(oyun, site):
+    """保存的商品编号不对（下架 / 换了编号）：自动改回打开分类页，照样买到"""
+    _real_listing(site)
+    oyun.save_data("catalog", {"time": "x", "items": [{"id": "99999", "name": "250 TL App Store Card", "type": "1",
+                                                        "price": "262.50", "options": "[]"}]})
+    record = run(oyun, amount=250)
+    assert record["code"] == "success", record
+    gets = [e["path"] for e in site.state()["log"] if e["method"] == "GET"]
+    assert CATEGORY in gets
+    assert oyun._catalog_table()[250]["id"] == "10160"
+
+
+def test_quick_buy_out_of_stock(oyun, site):
+    _real_listing(site, stock="0")
+    oyun.save_data("catalog", {"time": "x", "items": [{"id": "10160", "name": "250 TL App Store Card", "type": "1",
+                                                        "price": "262.50", "options": "[]"}]})
+    record = run(oyun, amount=250)
+    assert record["code"] == "out_of_stock", record
+
+
+def test_warm_up_closed_by_nobuy_and_by_timeout(oyun, site, monkeypatch):
+    import app.plugins.oyunforgiftcard as plugin_module
+
+    _real_listing(site)
+    oyun.handle_button(_button("pick:100:1"))
+    time.sleep(2)
+    oyun.handle_button(_button("nobuy"))
+    assert wait_idle(oyun, 30)
+    monkeypatch.setattr(plugin_module, "WARM_TTL", 3)
+    oyun.handle_button(_button("pick:100:1"))
+    assert wait_idle(oyun, 40)
+    assert not oyun.get_data("history")
+
+
+def test_nightly_refresh_saves_ids(oyun, site):
+    _real_listing(site)
+    assert not oyun._catalog_table()
+    oyun.refresh_catalog()
+    deadline = time.time() + 60
+    while time.time() < deadline and not oyun._catalog_table():
+        time.sleep(0.5)
+    assert oyun._catalog_table()[250]["id"] == "10160"
+    assert any(s["id"].endswith("Catalog") for s in oyun.get_service())
