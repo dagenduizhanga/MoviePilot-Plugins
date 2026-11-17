@@ -100,6 +100,8 @@ class _Job:
         self.pay_info: Dict[str, Any] = {}
         self.qr_path: Optional[Path] = None
         self.qr_token = secrets.token_hex(16)
+        # 是否在等用户直接回复验证码（结束时要释放）
+        self.text_input = False
 
 
 class _KnownCodes:
@@ -127,6 +129,8 @@ class _PluginInteraction(Interaction):
 
     def verification_feedback(self, text: str) -> None:
         self.plugin.send(self.job.reply, "【Oyunfor 验证】", text, force=True)
+        # 还在等验证码（比如上一个不对）：让用户下一条普通消息继续当验证码
+        self.plugin.await_text_input(self.job)
 
     def payment_needed(self, info: Dict[str, Any], qr: Optional[Path], screenshot: Optional[Path]) -> None:
         self.job.waiting = "binance"
@@ -159,7 +163,7 @@ class OyunforGiftCard(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png"
     # 插件版本
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     # 插件作者
     plugin_author = "dagenduizhanga"
     # 作者主页
@@ -472,30 +476,103 @@ class OyunforGiftCard(_PluginBase):
         return "/oyunfor" + (f"_{name}" if name else "") + (f"_{suffix}" if suffix else "")
 
     def notify_verification(self, job: _Job, kind: str, detail: str):
-        """验证提醒：银行卡付款一律按「需要输入验证码」提醒；登录验证码单独说明"""
+        """
+        验证提醒。能接管用户下一条普通消息时（命令或按钮触发的任务），提示「直接回复验证码」，不用记命令；
+        否则（定时任务等）提示用命令回复。
+        """
         plugin_id = self.__class__.__name__
         minutes = max(1, self._verify_timeout // 60)
+        plain = self.await_text_input(job)
+        how = "直接把验证码发给我就行（例如 123456），不用加命令" if plain else f"回复：{self._cmd('code')} 123456"
         cancel = {"text": "❌ 取消购买", "callback_data": f"[PLUGIN]{plugin_id}|cancel"}
+        resend = {"text": "🔁 重新发送验证码", "callback_data": f"[PLUGIN]{plugin_id}|resend"}
         if kind == "login":
             title = "【Oyunfor 登录验证】需要验证码"
-            lines = [
-                "Cookie 失效了，插件正在用账号密码登录，Oyunfor 发了一个验证码（通常在你的邮箱里）。",
-                f"👉 收到后回复：{self._cmd('code')} 123456",
-            ]
+            lines = ["Cookie 失效了，插件正在用账号密码登录，Oyunfor 发了一个验证码（通常在你的邮箱里）。",
+                     f"👉 收到后{how}"]
             buttons = [[cancel]]
+        elif kind == "gateway":
+            title = "【Oyunfor 支付页验证】需要验证码（还没付款）"
+            lines = ["PayTR 要先验证一下才显示你保存的银行卡，这一步还没有付款。",
+                     "验证码一般发到你第一次保存卡时填的手机号。",
+                     f"👉 收到后{how}",
+                     "没收到就点「重新发送验证码」。"]
+            buttons = [[resend, cancel]]
         else:
             title = "【Oyunfor 付款验证】需要输入验证码"
-            lines = [
-                "👉 银行会把验证码发到你的手机（短信 / App 里显示），收到后回复：",
-                f"{self._cmd('code')} 123456",
-                "如果银行只要你在 App 里点确认，确认后页面会自动继续，不用回复。",
-            ]
-            buttons = [[{"text": "✅ 已在 App 确认", "callback_data": f"[PLUGIN]{plugin_id}|approved"}, cancel]]
-        lines.append(f"不想买了：{self._cmd('cancel')}；⏳ {minutes} 分钟内有效")
+            lines = ["银行会把验证码发到你的手机（短信 / App 里显示）。",
+                     f"👉 收到后{how}",
+                     "如果银行只要你在 App 里点确认，确认后页面会自动继续，不用回复。"]
+            buttons = [[{"text": "✅ 已在 App 确认", "callback_data": f"[PLUGIN]{plugin_id}|approved"}],
+                       [resend, cancel]]
+        lines.append(f"不想买了：点「取消购买」{'或回复「取消」' if plain else ''}；⏳ {minutes} 分钟内有效")
         detail = mask_card_text(detail)
         if detail:
-            lines.append(f"📄 页面：{detail[:100]}")
+            lines.append(f"📄 页面：{detail[:260 if kind == 'gateway' else 120]}")
         self.send(job.reply, title, "\n".join(lines), buttons=buttons, force=True, save_history=False)
+
+    # ------------------------------------------------------------------ 直接回复验证码（不用命令）
+    @staticmethod
+    def _input_manager():
+        """MoviePilot 的「插件接管用户下一条消息」功能（新版才有）"""
+        try:
+            from app.helper.interaction import plugin_input_interaction_manager
+            return plugin_input_interaction_manager
+        except Exception:  # noqa
+            return None
+
+    def await_text_input(self, job: Optional[_Job]) -> bool:
+        """
+        让触发任务的用户下一条普通消息（不是命令）直接交给插件当验证码。
+        :return: 是否可以「直接回复」（有回复目标）；MoviePilot 旧版没有这个功能时，靠 UserMessage 事件兜底
+        """
+        reply = (job.reply if job else None) or {}
+        if not reply.get("userid"):
+            return False
+        manager = self._input_manager()
+        if manager:
+            try:
+                manager.create_or_replace(
+                    user_id=reply["userid"], plugin_id=self.__class__.__name__, channel=reply.get("channel"),
+                    source=reply.get("source"), username=None, prompt_id=f"oyunfor-code-{job.id}",
+                    timeout_seconds=max(60, self._verify_timeout), payload={"job": job.id})
+            except Exception as err:  # noqa
+                logger.debug(f"Oyunfor：注册直接回复失败 - {err}")
+        job.text_input = True
+        return True
+
+    def release_text_input(self, job: Optional[_Job]):
+        """任务结束：不再接管用户的消息"""
+        reply = (job.reply if job else None) or {}
+        if not job or not getattr(job, "text_input", False) or not reply.get("userid"):
+            return
+        job.text_input = False
+        manager = self._input_manager()
+        if not manager:
+            return
+        try:
+            pending = manager.get_by_user(reply["userid"], reply.get("channel"), reply.get("source"))
+            if pending and pending.plugin_id == self.__class__.__name__:
+                manager.pop_by_user(reply["userid"], reply.get("channel"), reply.get("source"))
+        except Exception:  # noqa
+            pass
+
+    def handle_text_code(self, reply: dict, text: str):
+        """用户直接回复的一条普通消息：当验证码交给正在等待的任务"""
+        job = self._job
+        value = (text or "").strip()
+        if value in ("取消", "退出", "cancel", "q", "quit", "exit"):
+            ok, message = self.cancel_job()
+            self.send(reply, "【Oyunfor】", message, force=True, save_history=False)
+            return
+        if not job or not job.waiting or job.waiting == "binance":
+            self.send(reply, "【Oyunfor】", "现在没有在等验证码", force=True, save_history=False)
+            return
+        ok, message = self.submit_code(value)
+        if not ok:
+            # 格式不对：提示一下，继续等下一条
+            self.send(reply, "【Oyunfor 验证】", f"{message}，请直接发验证码数字", force=True, save_history=False)
+            self.await_text_input(job)
 
     def qr_image_url(self, job: _Job) -> Optional[str]:
         """给消息渠道取二维码图片用的地址（MoviePilot 自己去取，再以图片发给 Telegram 等渠道）"""
@@ -740,6 +817,7 @@ class OyunforGiftCard(_PluginBase):
             result = PurchaseResult(status="error", message=f"{type(err).__name__}: {str(err)[:200]}",
                                     steps=list(recorder.steps))
         finally:
+            self.release_text_input(job)
             try:
                 self._finish_purchase(job, request, result, recorder)
             finally:
@@ -779,6 +857,7 @@ class OyunforGiftCard(_PluginBase):
             if info.get("message"):
                 lines.append(f"💬 {info['message']}")
             self.send(job.reply, "【Oyunfor 账户】", "\n".join(lines), force=self._has_target(job.reply))
+            self.release_text_input(job)
             self._job = None
             self._cleanup_runs()
             if self._lock:
@@ -891,6 +970,8 @@ class OyunforGiftCard(_PluginBase):
             "category": "Oyunfor",
             # /oyunfor 是 /oyunfor_buy 的简写，走同一个动作
             "data": {"action": self.__action(name or "buy")},
+            # 机器人菜单里只显示 /oyunfor；其他命令不显示，但照样可以用
+            "show": not name,
         } for name, desc in commands]
 
     # ------------------------------------------------------------------ 机器人选面额
@@ -984,7 +1065,7 @@ class OyunforGiftCard(_PluginBase):
         if not action.startswith(self.__class__.__name__.lower() + "_"):
             return
         name = action[len(self.__class__.__name__) + 1:]
-        reply = {"channel": data.get("channel"), "userid": data.get("user")}
+        reply = {"channel": data.get("channel"), "userid": data.get("user"), "source": data.get("source")}
         arg_str = str(data.get("arg_str") or "").strip()
         if name == "buy":
             if not arg_str:
@@ -1019,10 +1100,27 @@ class OyunforGiftCard(_PluginBase):
         data = event.event_data or {}
         if data.get("plugin_id") != self.__class__.__name__:
             return
-        reply = {"channel": data.get("channel"), "userid": data.get("userid")}
+        reply = {"channel": data.get("channel"), "userid": data.get("userid"), "source": data.get("source")}
         text = str(data.get("text") or "")
+        if text.startswith("plugin_input|"):
+            # 用户直接回复的普通消息（MoviePilot 转给插件）
+            self.handle_text_code(reply, str(data.get("input_text") or ""))
+            return
+        if text.startswith("plugin_input_cancel|"):
+            ok, message = self.cancel_job()
+            self.send(reply, "【Oyunfor】", message, force=True, save_history=False)
+            return
+        if text.startswith("plugin_input_expired|"):
+            return
         if text in ("approved", "paid"):
             ok, message = self.submit_code("ok")
+        elif text == "resend":
+            job = self._job
+            if not job or not job.waiting:
+                ok, message = False, "现在没有在等验证码"
+            else:
+                job.inbox.put("resend")
+                ok, message = True, "好的，正在重新请求验证码，收到后直接发给我"
         elif text == "cancel":
             ok, message = self.cancel_job()
         else:
@@ -1031,6 +1129,25 @@ class OyunforGiftCard(_PluginBase):
             self.handle_buy_button(reply, text, edit=edit if edit["message_id"] and edit["chat_id"] else None)
             return
         self.send(reply, "【Oyunfor 验证】", message, force=True)
+
+    @eventmanager.register(EventType.UserMessage)
+    def handle_user_message(self, event: Event = None):
+        """
+        兜底：MoviePilot 旧版没有「插件接管下一条消息」时，普通消息会走 UserMessage 事件。
+        只在正在等验证码、而且是发起任务的那个人发来像验证码的内容时才处理。
+        """
+        if not event or self._input_manager():
+            return
+        job = self._job
+        if not job or not job.waiting or job.waiting == "binance" or not getattr(job, "text_input", False):
+            return
+        data = event.event_data or {}
+        reply = job.reply or {}
+        if str(data.get("userid")) != str(reply.get("userid")):
+            return
+        text = str(data.get("text") or "").strip()
+        if re.fullmatch(r"[0-9A-Za-z]{3,12}", re.sub(r"[\s-]", "", text)) or text in ("取消", "退出"):
+            self.handle_text_code(reply, text)
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [

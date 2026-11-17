@@ -64,6 +64,8 @@ TEXT_PATTERNS: Dict[str, List[str]] = {
     "login_submit": [r"^giris yap$", r"^giris$", r"^oturum ac$", r"^login$", r"^sign in$", r"^devam$"],
     "otp_submit": [r"^(gonder|onayla|dogrula|devam|devam et|tamam|ileri|submit|confirm|continue|verify|ok|next)\b"],
     "otp_request": [r"^(sms|kod|sifre|dogrulama kodu) ?(gonder|iste|al)\b", r"^(send|get|request) (sms|code|otp|passcode)\b",
+                    r"^(kodu? |sms(i)? |dogrulama kodunu? )?(tekrar|yeniden) gonder\b", r"^dogrulama kodu gonder\b",
+                    r"^(re-?send|send again)\b", r"^kod gonder\b",
                     r"^(kodu|sifreyi) gonder\b"],
 }
 # 这些文字说明元素不是「付款方式选项」，而是充值/保存卡之类的入口
@@ -249,10 +251,22 @@ _CARD_RUN_RE = re.compile(r"(?<![\w*•])[\d*•]{2,}(?:[ -][\d*•]{2,})*(?![\w
 _CARD_FULL_RE = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
 
 
+_PHONE_RE = re.compile(r"\+?\d[\d\s().-]{6,}\d")
+
+
+def _mask_phone(match: "re.Match") -> str:
+    raw = match.group(0)
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) >= 9 or (raw.startswith("+") and len(digits) >= 7):
+        return "***" + digits[-2:]
+    return raw
+
+
 def mask_card_text(text: Optional[str]) -> str:
-    """去掉文字里的卡号片段（发给聊天的页面摘要用）"""
+    """去掉文字里的卡号片段和手机号（发给聊天的页面摘要用）"""
     masked = _CARD_RUN_RE.sub(lambda m: "****" if re.search(r"[*•]", m.group(0)) else m.group(0), text or "")
-    return _CARD_FULL_RE.sub("****", masked)
+    masked = _CARD_FULL_RE.sub("****", masked)
+    return _PHONE_RE.sub(_mask_phone, masked)
 
 
 def parse_cookie(cookie_str: Optional[str]) -> Dict[str, str]:
@@ -459,7 +473,11 @@ JS_FIND_INPUT = "([kind, overrideSel]) => {" + _JS_FOLD + r"""
 
 JS_VERIFY_STATE = "([otpSel, loose]) => {" + _JS_FOLD + r"""
     const text = fold(document.body ? document.body.innerText : '').slice(0, 8000);
-    const verifyText = /(3d ?secure|3-d secure|\b3ds\b|dogrulama|tek kullanimlik|one[- ]?time|\botp\b|verification|\bsms\b|authenticat|authoris|authoriz|approve|digital token|digibank|secure ?code|id check|visa secure|safekey|guvenlik kodu|onay kodu|sifre)/.test(text);
+    const verifyRe = /(3d ?secure|3-d secure|\b3ds\b|dogrulama|tek kullanimlik|one[- ]?time|\botp\b|verification|\bsms\b|authenticat|authoris|authoriz|approve|digital token|digibank|secure ?code|id check|visa secure|safekey|guvenlik kodu|onay kodu|sifre)/;
+    const verifyText = verifyRe.test(text);
+    // 验证提示那句话（发给用户看）：第一个验证关键词前后的一段
+    const hit = text.match(verifyRe);
+    const focus = hit ? text.slice(Math.max(0, hit.index - 100), hit.index + 160) : '';
     const appText = /(approve|authoris|authoriz|push notification|notification|digital token|digibank|banking app|mobile app|in-app|\bin (the|your) [a-z0-9 ]{0,20}\bapp\b|confirm (the |this |your )?(payment|purchase|transaction)|waiting for (your )?(confirmation|approval)|\bokx\b|revolut|\bwise\b|uygulama(niz|si)?(dan| uzerinden| ile)|mobil uygulama|onaylayin|onay bekleniyor|check your (phone|device|app)|open your)/.test(text);
     const errorText = /(hatali|yanlis|incorrect|invalid|wrong|gecersiz|tekrar deneyin|try again|did not match|eslesmedi)/.test(text);
     // 一定不是验证码框的（卡信息、优惠券、搜索、数量等）
@@ -474,7 +492,7 @@ JS_VERIFY_STATE = "([otpSel, loose]) => {" + _JS_FOLD + r"""
         && /^(text|tel|number|password)$/.test((el.getAttribute('type') || 'text').toLowerCase()) && el.maxLength === 1);
     if (singles.length >= 4 && singles.length <= 8) {
         return {verifyText, appText, errorText, otp: {id: mark(singles[0]), group: singles.map(mark), score: 0},
-                inputs: singles.length, title: document.title || '', snippet: text.slice(0, 240), url: location.href};
+                inputs: singles.length, title: document.title || '', snippet: text.slice(0, 240), focus, url: location.href};
     }
     if (otpSel) { for (const el of document.querySelectorAll(otpSel)) { if (visible(el)) { consider.push({el, score: -1}); } } }
     for (const el of document.querySelectorAll('input')) {
@@ -498,7 +516,7 @@ JS_VERIFY_STATE = "([otpSel, loose]) => {" + _JS_FOLD + r"""
         // loose：银行验证页（外站）上只要有能输入的框，就当成验证码框
         if (c.score <= 1 || consider.length === 1 || (loose && verifyText)) otp = {id: mark(c.el), score: c.score};
     }
-    return {verifyText, appText, errorText, otp, inputs, title: document.title || '', snippet: text.slice(0, 240), url: location.href};
+    return {verifyText, appText, errorText, otp, inputs, title: document.title || '', snippet: text.slice(0, 240), focus, url: location.href};
 }
 """
 
@@ -754,6 +772,7 @@ SETTLE_IDLE_MAX = 3.0
 PAGE_LOAD_MAX = 6.0
 # 等页面上的东西出现的时限（秒，按真实时间算，不受「快速模式」影响 —— 快速模式只缩短点击之间的停顿）
 GATEWAY_WAIT = 45.0        # 点「进入支付页」后，等 PayTR 页面上出现已保存的卡 / 卡表单
+GATEWAY_VERIFY_GRACE = 8.0  # 支付页上只有「doğrulama」之类的字样、没有输入框时，先等这么久再告诉用户（多半只是加载中的提示）
 TOPUP_BUTTON_WAIT = 20.0   # 补差额页选了付款方式后，等付款渠道和「Ödeme Yap」按钮
 ADD_REDIRECT_WAIT = 10.0   # 点「加入购物车」后，等网站自己跳到购物车
 # 平常步骤的截图最多等几秒；连续失败这么多次，本次运行后面的平常截图就跳过（出错时的截图不受影响）
@@ -2214,7 +2233,9 @@ class OyunforShop:
             if command == "cancel" or interaction.cancelled():
                 self.snap("cancelled")
                 return OUT_CANCELLED, "已按你的指令取消", verification
-            if command and command != "ok":
+            if command == "resend":
+                requested_code = False
+            elif command and command != "ok":
                 # 验证码可能比验证页先到：先存着，等出现输入框再填
                 pending_code = command
 
@@ -2321,6 +2342,76 @@ class OyunforShop:
     def _login_form_showing(self) -> bool:
         return bool(self._find_input("password") and self._find_input("email"))
 
+    def wait_gateway(self, interaction: Interaction, ready: Callable[[], bool], timeout: float,
+                     verify_timeout: int) -> bool:
+        """
+        点「进入支付页」后等 PayTR 显示银行卡（已保存的卡 / 卡表单）。这时还没有点任何付款按钮，不会扣款。
+        PayTR 有时会先要求验证（例如在它不认识的浏览器上，先用短信验证保存卡时填的手机号，才显示已保存的卡）：
+        页面上有「发送验证码」就点；把验证码请求推送给用户，收到后填入，再继续等银行卡出现。
+        页面上只是有「doğrulama / 3D Secure」之类的字样、没有输入框时不打扰用户，先继续等（多半是加载中的提示）。
+        :param ready: 银行卡出现了返回 True
+        :return: 银行卡是否出现了
+        """
+        deadline = time.time() + timeout * self.wait_scale
+        seen_at = None
+        notified = False
+        requested = False
+        pending = ""
+        last_submit = 0.0
+        last_feedback = 0.0
+        while True:
+            self.adopt_new_page()
+            if ready():
+                if notified:
+                    self.note("验证通过，支付页显示出银行卡了")
+                return True
+            now = time.time()
+            if now >= deadline:
+                return False
+            command = interaction.poll()
+            if command == "cancel" or interaction.cancelled():
+                self.snap("cancelled")
+                raise FlowError("cancelled", "已按你的指令取消（还没有付款）")
+            if command == "resend":
+                requested = False
+            elif command and command != "ok":
+                pending = command
+            verify = self._verify_frame_state()
+            if not verify:
+                seen_at = None
+            else:
+                vframe, vstate = verify
+                seen_at = seen_at or now
+                if not requested:
+                    button = self.find("otp_request", frame=vframe, maxLen=40, selector=BUTTON_SELECTOR)
+                    if button:
+                        requested = True
+                        self.click(button, frame=vframe, what=f"请求验证码（{button.get('text')}）")
+                        self.settle(5)
+                        continue
+                if not notified and (vstate.get("otp") or requested or now - seen_at >= GATEWAY_VERIFY_GRACE):
+                    notified = True
+                    deadline = max(deadline, now + verify_timeout)
+                    shot = self.snap("verify-gateway")
+                    snippet = mask_card_text(vstate.get("focus") or vstate.get("snippet", ""))
+                    self.note(f"支付页要求先验证（还没有付款）：{snippet[:160]}")
+                    interaction.verification_needed("gateway", snippet, 0, shot)
+                if pending and vstate.get("otp"):
+                    self._submit_otp(vframe, vstate["otp"], pending)
+                    pending = ""
+                    last_submit = time.time()
+                    self.settle(5)
+                    continue
+                if (vstate.get("errorText") and last_submit and now - last_submit > 4
+                        and last_submit > last_feedback):
+                    last_feedback = now
+                    interaction.verification_feedback("PayTR 提示验证码不对或已过期：可以点「重新发送验证码」，"
+                                                      "或直接回复新的验证码")
+            try:
+                self.page.wait_for_timeout(500)
+            except Exception:  # noqa
+                time.sleep(0.5)
+
     def _relay_codes(self, interaction: Interaction, timeout: int, purpose: str = "login") -> bool:
         """
         登录验证码（通常发到邮箱）转发：把验证码请求推送给用户，收到后填入。
@@ -2335,7 +2426,7 @@ class OyunforShop:
             command = interaction.poll()
             if command == "cancel" or interaction.cancelled():
                 return False
-            if command and command != "ok":
+            if command and command not in ("ok", "resend"):
                 pending = command
             verify = None if self._login_form_showing() else self._verify_frame_state()
             if not verify or not verify[1].get("otp"):
@@ -2727,19 +2818,12 @@ def run_purchase(shop: OyunforShop, request: PurchaseRequest, interaction: Inter
                 shop.snap("before-gateway")
                 shop.click(button, frame=frame, what=f"进入支付页（{button.get('text')}）")
                 shop.settle(15)
-
-                def gateway_ready() -> bool:
-                    # Oyunfor 补差额页的「Ödeme Yap」在新标签页打开 PayTR，标签页可能稍后才出现；
-                    # PayTR 页面自己还要几秒才把已保存的卡画出来（实测约 9 秒）
-                    shop.adopt_new_page()
-                    if shop.card_form_visible() or shop.saved_card_option(last4)[1]:
-                        return True
-                    if shop._verify_frame_state():
-                        raise FlowError("unknown", "进入支付页后直接出现了银行验证（可能自动使用了已保存的卡），"
-                                                   "插件已停止，请不要在银行 App 中确认这笔交易", paid=True)
-                    return False
-
-                if not shop.wait_until(gateway_ready, GATEWAY_WAIT, interval=0.5):
+                # Oyunfor 补差额页的「Ödeme Yap」在新标签页打开 PayTR，标签页可能稍后才出现；PayTR 页面自己还要
+                # 几秒才把已保存的卡画出来（实测约 9 秒），有时还要先验证手机号。这一步还没付款。
+                if not shop.wait_gateway(
+                        interaction,
+                        lambda: shop.card_form_visible() or bool(shop.saved_card_option(last4)[1]),
+                        GATEWAY_WAIT, request.verify_timeout):
                     shop.note(f"等了 {GATEWAY_WAIT * shop.wait_scale:.0f} 秒，支付页上还没有出现银行卡表单或已保存的卡")
                 shop.tick_agreements()
             shop.snap("gateway")

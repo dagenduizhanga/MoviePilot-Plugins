@@ -68,7 +68,10 @@ def _default_state():
         "binance_autoredirect": True,
         "binance_paid": [],
         "add_redirect_ms": 0,           # ajax 列表：加入购物车成功后过多少毫秒网站自己跳到购物车（真实站点约 1 秒；0 = 不跳）
-        "gateway_delay": 0,             # PayTR 2026 页面：已保存的卡过多少毫秒才画出来（真实约 9 秒）
+        "gateway_delay": 0,
+        "gateway_phone_otp": False,     # PayTR 2026：先要短信验证手机号才显示已保存的卡（不认识的浏览器）
+        "gateway_loading_text": False,  # PayTR 2026：卡片出来之前显示「doğrulanıyor」之类的加载提示
+        "paytr_otp_sent": 0,            # PayTR 手机验证码被请求了几次             # PayTR 2026 页面：已保存的卡过多少毫秒才画出来（真实约 9 秒）
         "slow_font": 0,                 # 每个页面都引用一个要下载这么多秒的网页字体（截图会等字体）
         "binance_qr_delay": 0,          # 币安收银台的二维码晚多少毫秒才出现（真实页面链接先出、二维码后画）
         "saved_card": False,
@@ -384,6 +387,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect(STATE["cart_path"])
         if path == "/odeme":
             return self.checkout_submit(data)
+        if path == "/paytr/otp/send":
+            with LOCK:
+                STATE["paytr_otp_sent"] += 1
+            return self.send_json({"ok": True})
         if path == "/paytr/pay":
             return self.gateway_submit(data)
         if path == "/acs/submit":
@@ -653,7 +660,8 @@ document.querySelector('.paymentSender').addEventListener('click', () => {
         if style == "paytr2026" and saved:
             with LOCK:
                 delay = int(STATE["gateway_delay"])
-            return self.paytr2026_form(order, total, error, delay)
+                phone_otp, loading = STATE["gateway_phone_otp"], STATE["gateway_loading_text"]
+            return self.paytr2026_form(order, total, error, delay, phone_otp, loading)
         months ="".join(f'<option value="{m:02d}">{m:02d}</option>' for m in range(1, 13))
         years = "".join(f'<option value="{y}">{y}</option>' for y in range(2026, 2036))
         saved_html = ""
@@ -680,7 +688,7 @@ document.getElementById('card_number').addEventListener('input', e => {{
 </script></body></html>"""
 
     @staticmethod
-    def paytr2026_form(order, total, error="", delay=0):
+    def paytr2026_form(order, total, error="", delay=0, phone_otp=False, loading=False):
         """仿 2026 年 PayTR「Güvenli Ödeme Sayfası」：已保存卡是 label 包着 Radix 单选 button[role=radio]；
         付款按钮是 type=button，class 里带 Tailwind 的「disabled:…」样式（按钮本身并没有禁用）"""
         radio_cls = ("aspect-square h-6 w-6 border-2 rounded-full focus:outline-none "
@@ -697,17 +705,35 @@ document.getElementById('card_number').addEventListener('input', e => {{
 <button type="button" class="flex items-center justify-between bg-white">TÜRKÇE</button>
 <div>Kart ile Ödeme</div><div>Diğer Ödeme Yöntemleri</div><div>Kayıtlı Kartlarım</div><div>Yeni Kartla Ödeme</div>{err}
 <form method="post" action="/paytr/pay" id="pay-form"><input type="hidden" name="order" value="{order}"><input type="hidden" name="saved" value="">
+<div id="loading">{"Ödeme bilgileriniz doğrulanıyor, lütfen bekleyin..." if loading else ""}</div>
+<div id="phone-otp" style="display:none"><p>Kayıtlı kartlarınızı görüntülemek için cep telefonunuza (+1 *** *** 0147) gönderilecek doğrulama kodunu girin.</p>
+<button type="button" id="send-otp">Kod Gönder</button>
+<div id="otp-box" style="display:none"><input type="text" name="dogrulama_kodu" maxlength="6" placeholder="Doğrulama Kodu" inputmode="numeric">
+<button type="button" id="check-otp">Doğrula</button><p id="otp-err" style="display:none">Doğrulama kodu hatalı.</p></div></div>
 <div id="cards"></div><template id="cards-tpl">{cards}</template><div>Ödemeniz Gereken Tutar {money(total * 1.025)} TL</div>
 <button type="button" class="{pay_cls}" id="pay">Ödeme Yap</button></form>
 <script>
-// 真实 PayTR 页面是脚本渲染的：已保存的卡要过一会儿才出现
-setTimeout(() => {{
+// 真实 PayTR 页面是脚本渲染的：已保存的卡要过一会儿才出现；不认识的浏览器要先验证手机号
+function showCards() {{
+  document.getElementById('loading').textContent = '';
+  document.getElementById('phone-otp').style.display = 'none';
   document.getElementById('cards').innerHTML = document.getElementById('cards-tpl').innerHTML;
   document.querySelectorAll('#cards [role=radio]').forEach(r => r.addEventListener('click', () => {{
     document.querySelectorAll('#cards [role=radio]').forEach(x => {{ x.setAttribute('aria-checked', 'false'); x.dataset.state = 'unchecked'; }});
     r.setAttribute('aria-checked', 'true'); r.dataset.state = 'checked';
     document.querySelector('[name=saved]').value = r.value;
   }}));
+}}
+document.getElementById('send-otp').addEventListener('click', () => {{
+  fetch('/paytr/otp/send', {{method: 'POST'}}).then(() => {{ document.getElementById('otp-box').style.display = ''; }});
+}});
+document.getElementById('check-otp').addEventListener('click', () => {{
+  const code = document.querySelector('[name=dogrulama_kodu]').value;
+  if (code === '246810') showCards(); else document.getElementById('otp-err').style.display = '';
+}});
+setTimeout(() => {{
+  if ({'true' if phone_otp else 'false'}) {{ document.getElementById('loading').textContent = ''; document.getElementById('phone-otp').style.display = ''; }}
+  else showCards();
 }}, {delay});
 document.getElementById('pay').addEventListener('click', () => {{
   if (!document.querySelector('[name=saved]').value) {{ alert('Lütfen bir kart seçin'); return; }}
@@ -916,6 +942,8 @@ setInterval(async () => {{ const r = await fetch('/binance/status?order={order}'
                 for key, value in query.items():
                     if key == "balance":
                         STATE[key] = float(value)
+                    elif key in ("gateway_phone_otp", "gateway_loading_text"):
+                        STATE[key] = value in ("1", "true", "yes")
                     elif key in ("stock", "require_sms_login", "success_shows_code", "saved_card", "show_buy_now",
                                  "binance_autoredirect"):
                         STATE[key] = value in ("1", "true", "yes")

@@ -118,7 +118,7 @@ def test_card_otp_wrong_then_right(oyun, site):
     # 第一行就说清楚：要输入验证码
     assert "需要输入验证码" in prompt["title"]
     assert "/oyunfor_code" in prompt["text"]
-    assert prompt["buttons"][0][-1] == {"text": "❌ 取消购买", "callback_data": "[PLUGIN]OyunforGiftCard|cancel"}
+    assert prompt["buttons"][-1][-1] == {"text": "❌ 取消购买", "callback_data": "[PLUGIN]OyunforGiftCard|cancel"}
     assert prompt.get("save_history") is False
     assert oyun._job.waiting == "otp"
     # 错误验证码：通过远程命令事件提交
@@ -807,3 +807,65 @@ def test_site_redirects_to_cart_after_add_and_slow_fonts(oyun, site):
     steps = oyun._read_run_file(run_dir / "steps.log.enc").decode("utf-8")
     assert "截图失败" not in steps and "ERR_ABORTED" not in steps, steps
     assert time.time() - began < 100
+
+
+
+# ---------------------------------------------------------------- PayTR 付款前的验证、直接回复验证码
+def _paytr_card_site(site, **extra):
+    site.set(saved_card="1", acs_mode="none", gateway_style="paytr2026", cart_button="oyunfor", cart_path="/sepetim",
+             header_cart="icon", balance="0", **extra)
+
+
+def _reply_text(oyun, text):
+    """用户在聊天里直接发一条普通消息（MoviePilot 把它转给插件）"""
+    oyun.handle_button(Event(EventType.MessageAction, {"plugin_id": "OyunforGiftCard", "text": "plugin_input|abc123",
+                                                       "input_text": text, "channel": "Telegram", "userid": "42"}))
+
+
+def test_paytr_phone_verification_before_payment(oyun, site):
+    """PayTR 在不认识的浏览器上要先短信验证手机号才显示已保存的卡：这一步还没付款。
+    插件点「Kod Gönder」，提示用户直接回复验证码；错了再要，对了继续用已保存的卡付款"""
+    _paytr_card_site(site, gateway_delay="2000", gateway_phone_otp="1")
+    oyun.init_plugin(make_config(pay_mode="card"))
+    ok, message = oyun.start_purchase(reply={"channel": "Telegram", "userid": "42"})
+    assert ok, message
+    prompt = wait_message(oyun, "支付页验证")
+    assert prompt, oyun.messages
+    assert "还没付款" in prompt["title"] and "直接把验证码发给我" in prompt["text"]
+    assert "/oyunfor_code" not in prompt["text"] and "0147" not in prompt["text"]
+    assert [b["text"] for row in prompt["buttons"] for b in row] == ["🔁 重新发送验证码", "❌ 取消购买"]
+    assert site.state()["paytr_otp_sent"] == 1
+    oyun.handle_button(Event(EventType.MessageAction, {"plugin_id": "OyunforGiftCard", "text": "resend",
+                                                       "channel": "Telegram", "userid": "42"}))
+    time.sleep(3)
+    assert site.state()["paytr_otp_sent"] == 2
+    start = len(oyun.messages)
+    _reply_text(oyun, "111111")
+    assert wait_message(oyun, "验证码不对", start=start), oyun.messages[start:]
+    _reply_text(oyun, "246810")
+    assert wait_idle(oyun, 120)
+    record = oyun.get_data("history")[-1]
+    assert record["code"] == "success", record
+    assert site.posts("/paytr/pay")[-1]["data"].get("saved") == "tok_4242"
+    assert not any("结果未知" in (m.get("title") or "") for m in oyun.messages)
+
+
+def test_paytr_loading_text_does_not_stop_or_ping(oyun, site):
+    """卡片出来之前页面上写着「doğrulanıyor」：只是加载提示，不打扰用户、不停下"""
+    _paytr_card_site(site, gateway_delay="4000", gateway_loading_text="1")
+    oyun.init_plugin(make_config(pay_mode="card"))
+    record = run(oyun, reply={"channel": "Telegram", "userid": "42"})
+    assert record["code"] == "success", record
+    assert not any("验证" in (m.get("title") or "") for m in oyun.messages)
+
+
+def test_plain_reply_when_nothing_is_waiting(oyun):
+    _reply_text(oyun, "123456")
+    assert "没有在等验证码" in oyun.messages[-1]["text"]
+
+
+def test_menu_shows_only_short_command(oyun):
+    """机器人菜单里只显示 /oyunfor，其他命令隐藏但照样能用"""
+    shown = {c["cmd"]: c.get("show", True) for c in oyun.get_command()}
+    assert shown == {"/oyunfor": True, "/oyunfor_buy": False, "/oyunfor_code": False, "/oyunfor_paid": False,
+                     "/oyunfor_cancel": False, "/oyunfor_status": False}

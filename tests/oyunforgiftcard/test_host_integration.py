@@ -122,7 +122,8 @@ def test_commands_registered(host):
     from app.command import Command
 
     commands = Command().get_commands()
-    for name in ("/oyunfor_buy", "/oyunfor_code", "/oyunfor_paid", "/oyunfor_cancel", "/oyunfor_status"):
+    # 菜单里只显示 /oyunfor，其他命令不显示但照样注册、能用
+    for name in ("/oyunfor", "/oyunfor_buy", "/oyunfor_code", "/oyunfor_paid", "/oyunfor_cancel", "/oyunfor_status"):
         assert name in commands, list(commands.keys())
 
 
