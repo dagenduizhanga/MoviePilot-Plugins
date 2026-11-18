@@ -1003,6 +1003,9 @@ setInterval(async () => {{ const r = await fetch('/binance/status?order={order}'
                         STATE[key] = value in ("1", "true", "yes")
                     elif key == "cart":
                         STATE["cart"] = [{"product": p, "qty": 1} for p in value.split(",") if p]
+                    elif key == "sessions":
+                        # 有效的会话（逗号分隔）；设成空 = 所有 Cookie 都失效（模拟 Cookie 过期）
+                        STATE[key] = [v for v in value.split(",") if v]
                     elif key in ("cf_error_left", "binance_qr_delay", "add_redirect_ms", "gateway_delay", "slow_font"):
                         STATE[key] = int(value)
                     else:

@@ -988,4 +988,87 @@ def test_nightly_refresh_saves_ids(oyun, site):
     while time.time() < deadline and not oyun._catalog_table():
         time.sleep(0.5)
     assert oyun._catalog_table()[250]["id"] == "10160"
+    # 默认每天 09:00 检查 Cookie 时一起刷新；不检查 Cookie 时单独在凌晨刷新
+    assert any(s["id"].endswith("Keepalive") for s in oyun.get_service())
+    oyun.init_plugin(make_config(keepalive_time=""))
     assert any(s["id"].endswith("Catalog") for s in oyun.get_service())
+
+
+
+# ---------------------------------------------------------------- 每天检查 Cookie（保活）
+def _wait_check(oyun, timeout=90):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if oyun._job is None and oyun._lock.acquire(blocking=False):
+            oyun._lock.release()
+            return True
+        time.sleep(0.3)
+    return False
+
+
+def _cookie_alerts(oyun):
+    return [m for m in oyun.messages if "Cookie 已失效" in (m.get("title") or "")]
+
+
+def test_keepalive_valid_cookie_is_silent(oyun, site):
+    """Cookie 有效：不发消息，只更新账户状态（顺便刷新快速下单的商品编号）"""
+    site.set(listing_style="oyunfor", cart_path="/sepetim", header_cart="icon")
+    oyun.init_plugin(make_config(notify=True))
+    oyun.run_keepalive()
+    time.sleep(0.5)
+    assert _wait_check(oyun)
+    assert not oyun.messages, oyun.messages
+    assert (oyun.get_data("account") or {}).get("logged_in") is True
+    assert oyun._catalog_table()[250]["id"] == "10160"
+
+
+def test_keepalive_expired_cookie_alerts_even_with_notify_off(oyun, site):
+    """Cookie 失效（也没有账号密码可以自动登录）：发一条提醒，「发送通知」关着也发"""
+    site.set(sessions="EXPIRED")
+    oyun.init_plugin(make_config(notify=False))
+    oyun.run_keepalive()
+    time.sleep(0.5)
+    assert _wait_check(oyun)
+    alerts = _cookie_alerts(oyun)
+    assert len(alerts) == 1, oyun.messages
+    assert "安全录入" in alerts[0]["text"]
+    assert (oyun.get_data("account") or {}).get("logged_in") is False
+
+
+def test_keepalive_relogs_in_with_saved_password(oyun, site):
+    """Cookie 失效但存了账号密码：自动重新登录，不打扰"""
+    site.set(sessions="EXPIRED")
+    set_secrets(oyun, username="user@example.com", password="secret")
+    oyun.run_keepalive()
+    time.sleep(0.5)
+    assert _wait_check(oyun)
+    assert not _cookie_alerts(oyun), oyun.messages
+    assert (oyun.get_data("account") or {}).get("logged_in") is True
+
+
+def test_keepalive_site_down_retries_without_alert(oyun, site, monkeypatch):
+    """网站打不开、没能确认：过一会儿再试，不发消息，也不把账户状态改成未知"""
+    import app.plugins.oyunforgiftcard as plugin_module
+
+    monkeypatch.setattr(plugin_module, "KEEPALIVE_RETRY_DELAY", 2)
+    site.set(cf_error_path="/", cf_error_left="99")
+    oyun.run_keepalive()
+    for _ in range(3):
+        time.sleep(3)
+        assert _wait_check(oyun)
+    assert not oyun.messages and not oyun.get_data("account")
+    homes = [e for e in site.state()["log"] if e["method"] == "GET" and e["path"] == "/"]
+    assert len(homes) >= 8
+
+
+def test_keepalive_schedule_and_time_formats(oyun):
+    def trigger_of(config):
+        oyun.init_plugin(make_config(**config))
+        return [s for s in oyun.get_service() if s["id"].endswith("Keepalive")]
+
+    default = trigger_of({})
+    assert default and "hour='9'" in str(default[0]["trigger"]) and "minute='0'" in str(default[0]["trigger"])
+    half = trigger_of({"keepalive_time": "21点半"})
+    assert "hour='21'" in str(half[0]["trigger"]) and "minute='30'" in str(half[0]["trigger"])
+    assert not trigger_of({"keepalive_time": ""})
+    assert not trigger_of({"keepalive_time": "25:99"})
