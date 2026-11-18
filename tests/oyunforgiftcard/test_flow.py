@@ -990,7 +990,7 @@ def test_nightly_refresh_saves_ids(oyun, site):
     assert oyun._catalog_table()[250]["id"] == "10160"
     # 默认每天 09:00 检查 Cookie 时一起刷新；不检查 Cookie 时单独在凌晨刷新
     assert any(s["id"].endswith("Keepalive") for s in oyun.get_service())
-    oyun.init_plugin(make_config(keepalive_time=""))
+    oyun.init_plugin(make_config(keepalive_cron=""))
     assert any(s["id"].endswith("Catalog") for s in oyun.get_service())
 
 
@@ -1061,14 +1061,31 @@ def test_keepalive_site_down_retries_without_alert(oyun, site, monkeypatch):
     assert len(homes) >= 8
 
 
-def test_keepalive_schedule_and_time_formats(oyun):
+def test_keepalive_schedule_cron_and_migration(oyun):
+    """检查 Cookie 用 cron（默认每天 09:00）；1.2.2 存的时间（如 21点半）自动换算成 cron"""
     def trigger_of(config):
         oyun.init_plugin(make_config(**config))
-        return [s for s in oyun.get_service() if s["id"].endswith("Keepalive")]
+        found = [s for s in oyun.get_service() if s["id"].endswith("Keepalive")]
+        return str(found[0]["trigger"]) if found else None
 
     default = trigger_of({})
-    assert default and "hour='9'" in str(default[0]["trigger"]) and "minute='0'" in str(default[0]["trigger"])
-    half = trigger_of({"keepalive_time": "21点半"})
-    assert "hour='21'" in str(half[0]["trigger"]) and "minute='30'" in str(half[0]["trigger"])
-    assert not trigger_of({"keepalive_time": ""})
-    assert not trigger_of({"keepalive_time": "25:99"})
+    assert default and "hour='9'" in default and "minute='0'" in default
+    twice = trigger_of({"keepalive_cron": "0 9,21 * * 1-5"})
+    assert "hour='9,21'" in twice and "day_of_week='1-5'" in twice
+    assert trigger_of({"keepalive_cron": ""}) is None
+    assert trigger_of({"keepalive_cron": "nope nope"}) is None
+    legacy = make_config()
+    legacy.pop("keepalive_cron", None)
+    legacy["keepalive_time"] = "21点半"
+    saved = {}
+    monkeypatch_config = oyun.update_config
+    oyun.update_config = lambda config, *args, **kwargs: saved.update(config)
+    try:
+        oyun.init_plugin(legacy)
+    finally:
+        oyun.update_config = monkeypatch_config
+    assert oyun._keepalive_cron == "30 21 * * *"
+    # 换算后的 cron 写回设置，设置页上显示的就是实际用的周期
+    assert saved.get("keepalive_cron") == "30 21 * * *" and "keepalive_time" not in saved
+    form, model = oyun.get_form()
+    assert model["keepalive_cron"] == "0 9 * * *" and "keepalive_time" not in model

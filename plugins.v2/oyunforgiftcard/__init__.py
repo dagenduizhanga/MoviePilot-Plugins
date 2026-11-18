@@ -52,10 +52,11 @@ MENU_AMOUNTS = (100, 250, 500, 1000, 1250, 1500, 1750, 2000)
 BUY_BUTTON_TTL = 600
 # 快速下单：点了面额后提前准备好的浏览器最多等多久（秒），等不到「购买」就关掉
 WARM_TTL = 180
-# 每天几点刷新一次各面额的商品编号（顺便刷新登录状态 / Cloudflare 验证）；设置了「每天检查 Cookie」时改在检查时一起刷新
+# 每天几点刷新一次各面额的商品编号（顺便刷新登录状态 / Cloudflare 验证）；设置了「检查 Cookie」时改在检查时一起刷新
 CATALOG_REFRESH_HOUR, CATALOG_REFRESH_MINUTE = 4, 10
-# 每天检查 Cookie（保活）：默认时间；碰上正在买东西时隔多久再试；没能确认（网站打不开等）时隔多久再试；一天最多试几次
-DEFAULT_KEEPALIVE_TIME = "09:00"
+# 定时检查 Cookie（保活）：默认 cron（每天 09:00）；碰上正在买东西时隔多久再试；没能确认（网站打不开等）时隔多久再试；
+# 每次最多试几次
+DEFAULT_KEEPALIVE_CRON = "0 9 * * *"
 KEEPALIVE_BUSY_DELAY = 10 * 60
 KEEPALIVE_RETRY_DELAY = 15 * 60
 KEEPALIVE_MAX_TRIES = 3
@@ -204,7 +205,7 @@ class OyunforGiftCard(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png"
     # 插件版本
-    plugin_version = "1.2.2"
+    plugin_version = "1.2.3"
     # 插件作者
     plugin_author = "dagenduizhanga"
     # 作者主页
@@ -238,7 +239,7 @@ class OyunforGiftCard(_PluginBase):
     _daily_limit = 3
     _verify_timeout = 300
     _cron = ""
-    _keepalive_time = DEFAULT_KEEPALIVE_TIME
+    _keepalive_cron = DEFAULT_KEEPALIVE_CRON
     _use_proxy = False
     _proxy_url = ""
     _headless = False
@@ -275,7 +276,7 @@ class OyunforGiftCard(_PluginBase):
         self._daily_limit = self._int(config.get("daily_limit"), 3, 0, 100)
         self._verify_timeout = self._int(config.get("verify_timeout"), 300, 60, 900)
         self._cron = (config.get("cron") or "").strip()
-        self._keepalive_time = str(config.get("keepalive_time", DEFAULT_KEEPALIVE_TIME) or "").strip()
+        self._keepalive_cron = self._keepalive_cron_from(config)
         self._use_proxy = bool(config.get("use_proxy"))
         self._proxy_url = (config.get("proxy_url") or "").strip()
         self._headless = bool(config.get("headless"))
@@ -293,6 +294,9 @@ class OyunforGiftCard(_PluginBase):
             logger.warning(f"Oyunfor：{error}")
 
         need_save = self._migrate(config)
+        if "keepalive_time" in config and "keepalive_cron" not in config:
+            # 1.2.2 存的「每天检查 Cookie」时间已换算成 cron：写回设置，设置页上显示的就是实际用的周期
+            need_save = True
         if self._onlyonce:
             self._onlyonce = False
             need_save = True
@@ -324,7 +328,7 @@ class OyunforGiftCard(_PluginBase):
             "amount": self._amount, "product_url": self._product_url, "quantity": self._quantity,
             "pay_mode": self._pay_mode, "pay_timeout": self._pay_timeout, "max_total": self._max_total,
             "daily_limit": self._daily_limit, "verify_timeout": self._verify_timeout, "cron": self._cron,
-            "keepalive_time": self._keepalive_time,
+            "keepalive_cron": self._keepalive_cron,
             "use_proxy": self._use_proxy, "proxy_url": self._proxy_url, "headless": self._headless,
             "nav_timeout": self._nav_timeout, "clear_cart": self._clear_cart, "fast_mode": self._fast_mode,
             "quick_mode": self._quick_mode,
@@ -1488,15 +1492,15 @@ class OyunforGiftCard(_PluginBase):
                 })
             except Exception as err:
                 logger.error(f"Oyunfor：定时购买周期 {self._cron} 无效 - {err}")
-        keep = self._parse_time(self._keepalive_time) if self._keepalive_time else None
-        if self._keepalive_time and not keep:
-            logger.error(f"Oyunfor：每天检查 Cookie 的时间「{self._keepalive_time}」看不懂，请填 09:00 这样的格式")
+        keep = self._keepalive_trigger()
+        if self._keepalive_cron and not keep:
+            logger.error(f"Oyunfor：检查 Cookie 的周期「{self._keepalive_cron}」无效，请填 cron 表达式，如 0 9 * * *")
         if keep:
-            # 每天检查 Cookie（顺便刷新登录状态和快速下单的商品编号）
+            # 定时检查 Cookie（顺便刷新登录状态和快速下单的商品编号）
             services.append({
                 "id": f"{self.__class__.__name__}Keepalive",
                 "name": f"{self.plugin_name}（检查 Cookie）",
-                "trigger": CronTrigger(hour=keep[0], minute=keep[1]),
+                "trigger": keep,
                 "func": self.run_keepalive,
                 "kwargs": {},
             })
@@ -1517,7 +1521,33 @@ class OyunforGiftCard(_PluginBase):
         if not ok:
             self.send(None, "【Oyunfor 定时购买未执行】", message)
 
-    # ------------------------------------------------------------------ 每天检查 Cookie（保活）
+    # ------------------------------------------------------------------ 定时检查 Cookie（保活）
+    @classmethod
+    def _keepalive_cron_from(cls, config: dict) -> str:
+        """
+        「检查 Cookie」的 cron。1.2.2 存的是时间（keepalive_time，如 09:00）：自动换算成 cron（分 时 * * *），不用重新设置
+        """
+        if "keepalive_cron" in config:
+            return str(config.get("keepalive_cron") or "").strip()
+        if "keepalive_time" in config:
+            old = str(config.get("keepalive_time") or "").strip()
+            if not old:
+                return ""
+            hour_minute = cls._parse_time(old)
+            return f"{hour_minute[1]} {hour_minute[0]} * * *" if hour_minute else DEFAULT_KEEPALIVE_CRON
+        return DEFAULT_KEEPALIVE_CRON
+
+    def _keepalive_trigger(self) -> Optional[CronTrigger]:
+        """检查 Cookie 的触发器：cron 表达式；顺手兼容直接写的时间（如 09:00）；留空 / 无效返回 None"""
+        text = self._keepalive_cron
+        if not text:
+            return None
+        try:
+            return CronTrigger.from_crontab(text)
+        except Exception:  # noqa
+            hour_minute = self._parse_time(text)
+            return CronTrigger(hour=hour_minute[0], minute=hour_minute[1]) if hour_minute else None
+
     @staticmethod
     def _parse_time(text: str) -> Optional[Tuple[int, int]]:
         """「09:00」「9:30」「21」「9点」「9点半」「21点15分」→ (时, 分)；看不懂返回 None"""
@@ -1531,7 +1561,7 @@ class OyunforGiftCard(_PluginBase):
 
     def run_keepalive(self, attempt: int = 1):
         """
-        每天定时：用插件保存的登录状态打开 Oyunfor，看 Cookie 是否还有效（顺便刷新登录状态和快速下单的商品编号）。
+        定时：用插件保存的登录状态打开 Oyunfor，看 Cookie 是否还有效（顺便刷新登录状态和快速下单的商品编号）。
         失效（自动重新登录也不行）才发消息；有效不打扰；网站打不开等没能确认时过一会儿再试，不发消息。
         """
         if not self._enabled:
@@ -1556,7 +1586,7 @@ class OyunforGiftCard(_PluginBase):
 
     def _retry_keepalive(self, attempt: int, delay: int, reason: str):
         if attempt >= KEEPALIVE_MAX_TRIES:
-            logger.info(f"Oyunfor：{reason}，今天的 Cookie 检查先不做了")
+            logger.info(f"Oyunfor：{reason}，这次的 Cookie 检查先不做了")
             return
         logger.info(f"Oyunfor：{reason}，{max(1, delay // 60)} 分钟后再检查 Cookie")
         timer = threading.Timer(delay, self.run_keepalive, kwargs={"attempt": attempt + 1})
@@ -1614,7 +1644,7 @@ class OyunforGiftCard(_PluginBase):
     def notify_cookie_invalid(self, info: Dict[str, Any]):
         """Cookie 失效：发消息提醒（不受「发送通知」开关影响）"""
         meta = self._secret_meta()
-        lines = ["每天的 Cookie 检查发现：插件登录 Oyunfor 的状态已经失效（页面显示未登录），现在去买会失败。"]
+        lines = ["定时检查 Cookie 发现：插件登录 Oyunfor 的状态已经失效（页面显示未登录），现在去买会失败。"]
         if "username" in meta and "password" in meta:
             lines.append(f"用保存的账号密码自动重新登录也没成功：{info.get('message') or '原因未知'}")
         lines.append("👉 请重新复制 Oyunfor 的 Cookie：插件设置 → 安全录入 → Cookie。")
@@ -1671,8 +1701,8 @@ class OyunforGiftCard(_PluginBase):
                 hint(4, "VCronField", "留空不定时", model="cron", label="定时购买"),
             ]},
             {"component": "VRow", "content": [
-                hint(4, "VTextField", "如 09:00；Cookie 失效时发消息提醒你，有效就不打扰；留空不检查",
-                     model="keepalive_time", label="每天检查 Cookie", placeholder=DEFAULT_KEEPALIVE_TIME),
+                hint(4, "VCronField", "默认每天 09:00；Cookie 失效时发消息提醒你，有效就不打扰；留空不检查",
+                     model="keepalive_cron", label="检查 Cookie"),
             ]},
             {"component": "VRow", "content": [
                 hint(4, "VTextField", "等你在 App 确认 / 回复验证码", model="verify_timeout", label="验证等待（秒）",
@@ -1694,7 +1724,7 @@ class OyunforGiftCard(_PluginBase):
             {"component": "VRow", "content": [
                 hint(3, "VSwitch", "点击之间的停顿缩短到约 30%；遇到网站拦截再关掉", model="fast_mode", label="快速模式"),
                 hint(9, "VSwitch", "用保存的商品编号直接加入购物车（不打开商品列表）；在机器人里点面额时就提前打开浏览器、"
-                                   "清空购物车；每天检查 Cookie 时顺便刷新商品编号（不检查时凌晨 "
+                                   "清空购物车；检查 Cookie 时顺便刷新商品编号（不检查时凌晨 "
                                    f"{CATALOG_REFRESH_HOUR:02d}:{CATALOG_REFRESH_MINUTE:02d} 刷新）。对不上时自动改回老办法",
                      model="quick_mode", label="快速下单"),
             ]},
@@ -1738,7 +1768,7 @@ class OyunforGiftCard(_PluginBase):
             "enabled": False, "dry_run": True, "onlyonce": False, "notify": True,
             "amount": "250", "quantity": 1, "pay_mode": "balance",
             "product_url": DEFAULT_PRODUCT_URL, "max_total": 2000, "daily_limit": 3, "cron": "",
-            "keepalive_time": DEFAULT_KEEPALIVE_TIME,
+            "keepalive_cron": DEFAULT_KEEPALIVE_CRON,
             "verify_timeout": 300, "pay_timeout": 15, "nav_timeout": 60,
             "use_proxy": False, "proxy_url": "",
             "headless": False, "clear_cart": True, "fast_mode": True, "quick_mode": True, "show_code": True,

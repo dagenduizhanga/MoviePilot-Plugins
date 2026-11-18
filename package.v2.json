@@ -15,11 +15,12 @@
     "name": "Oyunfor 礼品卡购买",
     "description": "在 oyunfor.com 自动购买 App Store 礼品卡（TL）：余额 / 币安 / 银行卡付款，验证推送给你；敏感信息全部加密。",
     "labels": "Oyunfor,App Store,礼品卡,币安",
-    "version": "1.2.2",
+    "version": "1.2.3",
     "icon": "https://raw.githubusercontent.com/dagenduizhanga/MoviePilot-Plugins/main/icons/oyunforgiftcard.png",
     "author": "dagenduizhanga",
     "level": 1,
     "history": {
+      "v1.2.3": "修复了一点点错误，提升了一丢丢体验",
       "v1.2.2": "修复了一点点错误，提升了一丢丢体验",
       "v1.2.1": "修复了一点点错误，提升了一丢丢体验",
       "v1.2.0": "修复了一点点错误，提升了一丢丢体验",
